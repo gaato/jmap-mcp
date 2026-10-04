@@ -3,9 +3,9 @@
 package server
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gaato/jmap-mcp/internal/config"
@@ -18,12 +18,16 @@ import (
 // Version is reported to MCP clients.
 var Version = "dev"
 
-// New returns the HTTP handler for the whole server.
-func New(cfg *config.Config, verify auth.TokenVerifier, tools *mailtools.Tools, log *slog.Logger) http.Handler {
+// New returns the HTTP handler for the whole server. verifiers maps each
+// connector name to the token verifier for that connector's OAuth client;
+// every connector in cfg must have one.
+func New(cfg *config.Config, verifiers map[string]auth.TokenVerifier, tools *mailtools.Tools, log *slog.Logger) (http.Handler, error) {
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "jmap-mcp", Version: Version},
 		&mcp.ServerOptions{Instructions: mailtools.Instructions})
 	tools.Register(mcpServer)
 
+	// One stateless handler serves all connectors; what differs per connector
+	// is only which tokens are accepted in front of it.
 	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{
 			Stateless: true,
@@ -35,21 +39,43 @@ func New(cfg *config.Config, verify auth.TokenVerifier, tools *mailtools.Tools, 
 			DisableLocalhostProtection: true,
 		})
 
-	mcpPath := cfg.MCPPath()
-	prm := auth.ProtectedResourceMetadataHandler(
-		tokenauth.ProtectedResourceMetadata(cfg.PublicURL.String(), cfg.OAuthIssuer))
-
+	// The bare /.well-known/oauth-protected-resource is intentionally not
+	// served (404): each connector has its own issuer, and a client that
+	// guessed the bare document would pick up the wrong authorization server.
 	mux := http.NewServeMux()
-	mux.Handle(mcpPath, tokenauth.Middleware(verify, cfg.ResourceMetadataURL())(streamable))
-	mux.Handle("/.well-known/oauth-protected-resource", prm)
-	if suffix := strings.TrimSuffix(mcpPath, "/"); suffix != "" {
-		mux.Handle("/.well-known/oauth-protected-resource"+suffix, prm)
+	for _, cn := range cfg.Connectors {
+		verify, ok := verifiers[cn.Name]
+		if !ok {
+			return nil, fmt.Errorf("no token verifier for connector %q", cn.Name)
+		}
+		mux.Handle(cn.MCPPath, tokenauth.Middleware(verify, cn.ResourceMetadataURL)(streamable))
+		mux.Handle(cn.MetadataPath, auth.ProtectedResourceMetadataHandler(
+			tokenauth.ProtectedResourceMetadata(cn.Resource, cn.Issuer)))
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	return logRequests(log, mux)
+	return logRequests(log, mux), nil
+}
+
+// Verifiers builds one token verifier per connector. All connectors share
+// the allowed subject and the introspection endpoint; each has its own
+// issuer, audience and JWKS cache.
+func Verifiers(cfg *config.Config, log *slog.Logger) map[string]auth.TokenVerifier {
+	out := make(map[string]auth.TokenVerifier, len(cfg.Connectors))
+	for _, cn := range cfg.Connectors {
+		out[cn.Name] = tokenauth.New(tokenauth.Options{
+			Issuer:           cn.Issuer,
+			Audience:         cn.Audience,
+			JWKSURL:          cn.JWKSURL,
+			SubjectClaim:     cfg.OAuthSubjectClaim,
+			AllowedSubject:   cfg.OAuthAllowedSubject,
+			IntrospectionURL: cfg.OAuthIntrospectionURL,
+			Logger:           log.With("connector", cn.Name),
+		}).Verify
+	}
+	return out
 }
 
 type statusWriter struct {

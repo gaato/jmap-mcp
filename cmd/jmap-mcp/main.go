@@ -16,7 +16,6 @@ import (
 	"github.com/gaato/jmap-mcp/internal/jmap"
 	"github.com/gaato/jmap-mcp/internal/mailtools"
 	"github.com/gaato/jmap-mcp/internal/server"
-	"github.com/gaato/jmap-mcp/internal/tokenauth"
 )
 
 func main() {
@@ -33,17 +32,11 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	verifier := tokenauth.New(tokenauth.Options{
-		Issuer:           cfg.OAuthIssuer,
-		Audience:         cfg.OAuthAudience,
-		JWKSURL:          cfg.OAuthJWKSURL,
-		SubjectClaim:     cfg.OAuthSubjectClaim,
-		AllowedSubject:   cfg.OAuthAllowedSubject,
-		IntrospectionURL: cfg.OAuthIntrospectionURL,
-		Logger:           log,
-	})
 	mail := jmap.NewClient(cfg.JMAPSessionURL, cfg.JMAPUsername, cfg.JMAPPassword, nil)
-	handler := server.New(cfg, verifier.Verify, mailtools.New(mail, log), log)
+	handler, err := server.New(cfg, server.Verifiers(cfg, log), mailtools.New(mail, log), log)
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -56,8 +49,11 @@ func run(log *slog.Logger) error {
 	defer stop()
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", cfg.ListenAddr, "resource", cfg.PublicURL.String(),
-			"issuer", cfg.OAuthIssuer, "audience", cfg.OAuthAudience)
+		for _, cn := range cfg.Connectors {
+			log.Info("connector", "name", cn.Name, "resource", cn.Resource,
+				"issuer", cn.Issuer, "audience", cn.Audience)
+		}
+		log.Info("listening", "addr", cfg.ListenAddr)
 		errc <- srv.ListenAndServe()
 	}()
 	select {
