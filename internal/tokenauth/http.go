@@ -26,7 +26,9 @@ func ProtectedResourceMetadata(resource, issuer string) *oauthex.ProtectedResour
 // Middleware protects next with auth.RequireBearerToken and adds the RFC 6750
 // error codes the SDK leaves out of its WWW-Authenticate challenge:
 // error="invalid_token" on 401 when a token was presented, and
-// error="insufficient_scope" on 403.
+// error="insufficient_scope" on 403. The SDK answers 500 when the verifier
+// fails for reasons other than a bad token; that only happens when the JWKS
+// or introspection endpoint is unavailable, so it is turned into 503.
 func Middleware(verify auth.TokenVerifier, resourceMetadataURL string) func(http.Handler) http.Handler {
 	require := auth.RequireBearerToken(verify, &auth.RequireBearerTokenOptions{
 		ResourceMetadataURL: resourceMetadataURL,
@@ -67,6 +69,10 @@ func (c *challengeWriter) WriteHeader(code int) {
 	h := c.ResponseWriter.Header()
 	if v := h.Get("WWW-Authenticate"); errCode != "" && strings.HasPrefix(v, "Bearer ") {
 		h.Set("WWW-Authenticate", `Bearer error="`+errCode+`", `+strings.TrimPrefix(v, "Bearer "))
+	}
+	if code == http.StatusInternalServerError {
+		h.Set("Retry-After", "30")
+		code = http.StatusServiceUnavailable
 	}
 	c.ResponseWriter.WriteHeader(code)
 }

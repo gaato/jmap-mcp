@@ -26,27 +26,40 @@ import (
 
 // Options configures a Verifier.
 type Options struct {
-	Issuer         string // exact expected iss
-	Audience       string // must be contained in aud
-	JWKSURL        string
-	SubjectClaim   string // claim holding the user identity, normally "sub"
-	AllowedSubject string // the single user allowed to use this server
+	Issuer   string // exact expected iss
+	Audience string // must be contained in aud; client_id must equal it too
+	JWKSURL  string
+	// AllowedSubject is the single user allowed to use this server, compared
+	// exactly with the sub claim (Kanidm: the account UUID).
+	AllowedSubject string
 	// IntrospectionURL, if set, is called (RFC 7662, no client auth, as Kanidm
-	// allows) to detect revoked sessions. Results are cached briefly.
+	// allows) to detect revoked sessions. Positive results are cached for
+	// IntrospectionCacheTTL (at most a minute).
 	IntrospectionURL string
 
-	Leeway     time.Duration
+	Leeway time.Duration
+	// HTTPClient is used for JWKS and introspection. Redirects are never
+	// followed, so the token cannot be forwarded elsewhere.
 	HTTPClient *http.Client
 	Logger     *slog.Logger
 	Now        func() time.Time
 
-	// JWKSMaxAge bounds how long a fetched JWKS is trusted without refetching.
+	// JWKSMaxAge is when a fetched JWKS should be refreshed (soft expiry).
 	JWKSMaxAge time.Duration
-	// JWKSMinRefreshInterval rate-limits refetches caused by unknown kids.
+	// JWKSGrace is how long after JWKSMaxAge cached keys stay usable while
+	// refreshing fails; after that verification fails closed.
+	JWKSGrace time.Duration
+	// JWKSMinRefreshInterval rate-limits refetches (unknown kids, outages).
 	JWKSMinRefreshInterval time.Duration
-	// IntrospectionCacheTTL bounds how long a positive introspection result is reused.
+	// JWKSFetchTimeout bounds one JWKS fetch.
+	JWKSFetchTimeout time.Duration
+	// IntrospectionCacheTTL bounds how long a positive introspection result
+	// is reused; values above MaxIntrospectionCacheTTL are clamped.
 	IntrospectionCacheTTL time.Duration
 }
+
+// MaxIntrospectionCacheTTL bounds how late a revoked session is noticed.
+const MaxIntrospectionCacheTTL = time.Minute
 
 // Verifier implements auth.TokenVerifier.
 type Verifier struct {
@@ -62,17 +75,19 @@ type Verifier struct {
 // DefaultLeeway is the clock skew tolerated for exp/nbf/iat.
 const DefaultLeeway = 30 * time.Second
 
+func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 // New returns a Verifier. Zero-valued tuning options get sensible defaults.
 func New(o Options) *Verifier {
-	if o.SubjectClaim == "" {
-		o.SubjectClaim = "sub"
-	}
 	if o.Leeway == 0 {
 		o.Leeway = DefaultLeeway
 	}
 	if o.HTTPClient == nil {
 		o.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	hc := *o.HTTPClient
+	hc.CheckRedirect = noRedirects
+	o.HTTPClient = &hc
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -82,20 +97,28 @@ func New(o Options) *Verifier {
 	if o.JWKSMaxAge == 0 {
 		o.JWKSMaxAge = time.Hour
 	}
+	if o.JWKSGrace == 0 {
+		o.JWKSGrace = 10 * time.Minute
+	}
 	if o.JWKSMinRefreshInterval == 0 {
 		o.JWKSMinRefreshInterval = 30 * time.Second
 	}
-	if o.IntrospectionCacheTTL == 0 {
-		o.IntrospectionCacheTTL = time.Minute
+	if o.JWKSFetchTimeout == 0 {
+		o.JWKSFetchTimeout = 10 * time.Second
+	}
+	if o.IntrospectionCacheTTL <= 0 || o.IntrospectionCacheTTL > MaxIntrospectionCacheTTL {
+		o.IntrospectionCacheTTL = MaxIntrospectionCacheTTL
 	}
 	return &Verifier{
 		opts: o,
 		jwks: &jwksCache{
-			url:         o.JWKSURL,
-			client:      o.HTTPClient,
-			now:         o.Now,
-			maxAge:      o.JWKSMaxAge,
-			minInterval: o.JWKSMinRefreshInterval,
+			url:          o.JWKSURL,
+			client:       o.HTTPClient,
+			now:          o.Now,
+			softMaxAge:   o.JWKSMaxAge,
+			grace:        o.JWKSGrace,
+			minInterval:  o.JWKSMinRefreshInterval,
+			fetchTimeout: o.JWKSFetchTimeout,
 		},
 		parser: jwt.NewParser(
 			jwt.WithValidMethods([]string{"ES256", "RS256"}),
@@ -111,7 +134,7 @@ func New(o Options) *Verifier {
 	}
 }
 
-// errUnavailable is returned (and surfaces as HTTP 500) when the token could
+// errUnavailable is returned (and surfaces as HTTP 503, see Middleware) when the token could
 // not be checked because a dependency failed. It deliberately carries no detail.
 var errUnavailable = errors.New("token verification unavailable")
 
@@ -165,11 +188,27 @@ func (v *Verifier) verify(ctx context.Context, token string) (_ *auth.TokenInfo,
 		return nil, "typ is not at+jwt", nil
 	}
 
-	subject, _ := claims[v.opts.SubjectClaim].(string)
-	if subject == "" {
-		return nil, "subject claim missing", nil
+	// RFC 9068 section 2.2 required claims (iss, aud, exp are checked by
+	// the parser; nbf is optional).
+	subject, _ := claims["sub"].(string)
+	clientID, _ := claims["client_id"].(string)
+	jti, _ := claims["jti"].(string)
+	iat, err := claims.GetIssuedAt()
+	switch {
+	case subject == "":
+		return nil, "sub missing", nil
+	case clientID == "":
+		return nil, "client_id missing", nil
+	case jti == "":
+		return nil, "jti missing", nil
+	case err != nil || iat == nil:
+		return nil, "iat missing", nil
 	}
-	if !strings.EqualFold(subject, v.opts.AllowedSubject) {
+	// Kanidm sets client_id to the client name, which is also the audience.
+	if clientID != v.opts.Audience {
+		return nil, "client_id does not match audience", nil
+	}
+	if subject != v.opts.AllowedSubject {
 		return nil, "subject not allowed", nil
 	}
 
@@ -180,7 +219,6 @@ func (v *Verifier) verify(ctx context.Context, token string) (_ *auth.TokenInfo,
 
 	scopeStr, _ := claims["scope"].(string)
 
-	jti, _ := claims["jti"].(string)
 	if v.opts.IntrospectionURL != "" {
 		active, err := v.introspect(ctx, token, jti, exp.Time)
 		if err != nil {
@@ -200,7 +238,7 @@ func (v *Verifier) verify(ctx context.Context, token string) (_ *auth.TokenInfo,
 
 func (v *Verifier) introspect(ctx context.Context, token, jti string, exp time.Time) (bool, error) {
 	now := v.opts.Now()
-	if jti != "" {
+	{
 		v.introMu.Lock()
 		until, ok := v.introCache[jti]
 		for k, t := range v.introCache {
@@ -238,7 +276,7 @@ func (v *Verifier) introspect(ctx context.Context, token, jti string, exp time.T
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&r); err != nil {
 		return false, fmt.Errorf("introspect: %w", err)
 	}
-	if r.Active && jti != "" {
+	if r.Active {
 		until := now.Add(v.opts.IntrospectionCacheTTL)
 		if exp.Before(until) {
 			until = exp

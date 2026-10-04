@@ -99,3 +99,17 @@ func TestValidTokenPasses(t *testing.T) {
 		t.Fatalf("code = %d body=%q", rec.Code, rec.Body.String())
 	}
 }
+
+func TestUnavailableIs503(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	env.fail.Store(true)
+	env.now = timeNow()
+	h := Middleware(env.verifier(nil).Verify, testPRM)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("next called")
+	}))
+	rec := do(h, sign(t, k, env.kanidmClaims(), "at+jwt"))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("code = %d headers = %v", rec.Code, rec.Header())
+	}
+}

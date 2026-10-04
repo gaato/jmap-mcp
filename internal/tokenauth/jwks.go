@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // jwk is the subset of RFC 7517 fields needed to reconstruct verification keys.
@@ -36,15 +38,28 @@ type verificationKey struct {
 }
 
 // jwksCache fetches a JWKS document lazily and refetches it when a token
-// references an unknown kid (key rotation) or when the cached copy is stale.
-// Refetches are rate limited so that tokens with random kids cannot be used to
-// hammer the authorization server.
+// references an unknown kid (key rotation) or when the cached copy is older
+// than softMaxAge.
+//
+//   - Refetches are throttled to one per minInterval, also while no keys are
+//     cached (startup, outage), so tokens with random kids cannot be used to
+//     hammer the authorization server.
+//   - Concurrent misses share one fetch (singleflight). The fetch runs
+//     detached from the request context with its own timeout, so a client
+//     that disconnects cannot waste the refresh slot, and the mutex is never
+//     held during network I/O.
+//   - If refreshing fails, cached keys stay usable for a short grace period
+//     after softMaxAge; after that the cache fails closed.
 type jwksCache struct {
-	url         string
-	client      *http.Client
-	now         func() time.Time
-	maxAge      time.Duration
-	minInterval time.Duration
+	url          string
+	client       *http.Client
+	now          func() time.Time
+	softMaxAge   time.Duration
+	grace        time.Duration
+	minInterval  time.Duration
+	fetchTimeout time.Duration
+
+	sf singleflight.Group
 
 	mu        sync.Mutex
 	keys      map[string]verificationKey
@@ -52,36 +67,64 @@ type jwksCache struct {
 	triedAt   time.Time
 }
 
-func (c *jwksCache) lookup(ctx context.Context, kid string) (verificationKey, error) {
+var (
+	errUnknownKID   = errors.New("unknown kid")
+	errNoValidKeys  = errors.New("no valid signing keys (JWKS unavailable or expired)")
+	errJWKSThrottle = errors.New("jwks refresh throttled")
+)
+
+func (c *jwksCache) cached(kid string) (k verificationKey, found, fresh, usable bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	age := c.now().Sub(c.fetchedAt)
+	have := c.keys != nil
+	k, found = c.keys[kid]
+	return k, found, have && age <= c.softMaxAge, have && age <= c.softMaxAge+c.grace
+}
 
-	now := c.now()
-	stale := c.keys == nil || now.Sub(c.fetchedAt) > c.maxAge
-	k, ok := c.keys[kid]
-	if ok && !stale {
+func (c *jwksCache) lookup(ctx context.Context, kid string) (verificationKey, error) {
+	if k, found, fresh, _ := c.cached(kid); found && fresh {
 		return k, nil
 	}
-	if c.keys == nil || now.Sub(c.triedAt) >= c.minInterval {
-		c.triedAt = now
-		keys, err := c.fetch(ctx)
-		if err != nil {
-			if ok {
-				// Keep serving a known key if the refresh of a stale cache fails.
-				return k, nil
-			}
-			return verificationKey{}, err
-		}
-		c.keys, c.fetchedAt = keys, now
-		k, ok = c.keys[kid]
+	// Unknown kid or stale cache: try a (throttled, shared) refresh. Its
+	// error does not matter here; the cache state afterwards decides.
+	ch := c.sf.DoChan("refresh", func() (any, error) { return nil, c.refresh(ctx) })
+	select {
+	case <-ch:
+	case <-ctx.Done():
+		return verificationKey{}, ctx.Err()
 	}
-	if !ok {
+	k, found, _, usable := c.cached(kid)
+	switch {
+	case !usable:
+		return verificationKey{}, errNoValidKeys
+	case !found:
 		return verificationKey{}, errUnknownKID
 	}
 	return k, nil
 }
 
-var errUnknownKID = errors.New("unknown kid")
+func (c *jwksCache) refresh(ctx context.Context) error {
+	c.mu.Lock()
+	now := c.now()
+	if !c.triedAt.IsZero() && now.Sub(c.triedAt) < c.minInterval {
+		c.mu.Unlock()
+		return errJWKSThrottle
+	}
+	c.triedAt = now
+	c.mu.Unlock()
+
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.fetchTimeout)
+	defer cancel()
+	keys, err := c.fetch(fctx)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.keys, c.fetchedAt = keys, now
+	c.mu.Unlock()
+	return nil
+}
 
 func (c *jwksCache) fetch(ctx context.Context) (map[string]verificationKey, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)

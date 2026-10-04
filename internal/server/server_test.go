@@ -98,17 +98,23 @@ func setup(t *testing.T) *fixture {
 	mail := jmaptest.New()
 	t.Cleanup(mail.Close)
 
+	intro := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"active":true}`))
+	}))
+	t.Cleanup(intro.Close)
+
 	pw := filepath.Join(t.TempDir(), "pw")
 	if err := os.WriteFile(pw, []byte(jmaptest.Password), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	vars := map[string]string{
-		"PUBLIC_BASE_URL":       base,
-		"CONNECTORS":            "claude,chatgpt",
-		"OAUTH_ALLOWED_SUBJECT": subject,
-		"JMAP_SESSION_URL":      mail.SessionURL(),
-		"JMAP_USERNAME":         jmaptest.Username,
-		"JMAP_PASSWORD_FILE":    pw,
+		"PUBLIC_BASE_URL":         base,
+		"CONNECTORS":              "claude,chatgpt",
+		"OAUTH_ALLOWED_SUBJECT":   subject,
+		"OAUTH_INTROSPECTION_URL": intro.URL,
+		"JMAP_SESSION_URL":        mail.SessionURL(),
+		"JMAP_USERNAME":           jmaptest.Username,
+		"JMAP_PASSWORD_FILE":      pw,
 	}
 	for _, c := range []*connector{f.claude, f.chatgpt} {
 		p := "CONNECTOR_" + strings.ToUpper(c.name) + "_"

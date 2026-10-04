@@ -25,7 +25,8 @@ func validEnv(t *testing.T) map[string]string {
 		"CONNECTOR_CHATGPT_ISSUER":           "https://id.example.net/oauth2/openid/mcp-jmap-chatgpt",
 		"CONNECTOR_CHATGPT_AUDIENCE":         "mcp-jmap-chatgpt",
 		"CONNECTOR_CHATGPT_JWKS_URL":         "https://id.example.net/custom.jwk",
-		"OAUTH_ALLOWED_SUBJECT":              "uuid",
+		"OAUTH_ALLOWED_SUBJECT":              "0b4c6a8e-7f0e-4b7b-9d4e-2f3a5c6d7e8f",
+		"OAUTH_INTROSPECTION_URL":            "https://id.example.net/oauth2/token/introspect",
 		"JMAP_SESSION_URL":                   "https://mail.example.net/.well-known/jmap",
 		"JMAP_USERNAME":                      "me",
 		"JMAP_PASSWORD_FILE":                 pw,
@@ -38,7 +39,7 @@ func TestFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.JMAPPassword != "s3cret pass" || c.ListenAddr != ":8080" || c.OAuthSubjectClaim != "sub" {
+	if c.JMAPPassword != "s3cret pass" || c.ListenAddr != ":8080" {
 		t.Fatalf("config = %+v", c)
 	}
 	if len(c.Connectors) != 2 {
@@ -111,6 +112,11 @@ func TestFromEnvConnectorErrors(t *testing.T) {
 		{"bad name", func(e map[string]string) { e["CONNECTORS"] = "Claude" }, "invalid name"},
 		{"empty list", func(e map[string]string) { e["CONNECTORS"] = " , " }, "at least one connector"},
 		{"base with path", func(e map[string]string) { e["PUBLIC_BASE_URL"] = "https://mail-mcp.example.net/x" }, "without path"},
+		{"missing introspection", func(e map[string]string) { delete(e, "OAUTH_INTROSPECTION_URL") }, "OAUTH_INTROSPECTION_URL is required"},
+		{"subject not a uuid", func(e map[string]string) { e["OAUTH_ALLOWED_SUBJECT"] = "gaato" }, "must be a lowercase hyphenated UUID"},
+		{"subject uppercase uuid", func(e map[string]string) {
+			e["OAUTH_ALLOWED_SUBJECT"] = "0B4C6A8E-7F0E-4B7B-9D4E-2F3A5C6D7E8F"
+		}, "must be a lowercase hyphenated UUID"},
 		{"bad issuer", func(e map[string]string) { e["CONNECTOR_CLAUDE_ISSUER"] = "id.example.net" }, "CONNECTOR_CLAUDE_ISSUER must be"},
 	}
 	for _, tc := range tests {

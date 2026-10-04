@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,12 +55,21 @@ type testEnv struct {
 	mu      sync.Mutex
 	keys    []signer
 	now     time.Time
+	fail    atomic.Bool   // answer 500
+	gate    chan struct{} // if set, each fetch waits for a value
 }
 
 func newEnv(t *testing.T, keys ...signer) *testEnv {
 	e := &testEnv{t: t, keys: keys, now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)}
 	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		e.fetches.Add(1)
+		if e.gate != nil {
+			<-e.gate
+		}
+		if e.fail.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		var ks []map[string]string
@@ -160,6 +170,12 @@ func TestVerifyRejections(t *testing.T) {
 		{name: "missing typ", typ: "-"},
 		{name: "wrong subject", mutate: func(c jwt.MapClaims) { c["sub"] = "11111111-2222-3333-4444-555555555555" }},
 		{name: "missing subject", mutate: func(c jwt.MapClaims) { delete(c, "sub") }},
+		{name: "subject differs only in case", mutate: func(c jwt.MapClaims) { c["sub"] = strings.ToUpper(testSubject) }},
+		{name: "subject in another claim only", mutate: func(c jwt.MapClaims) { delete(c, "sub"); c["uuid"] = testSubject }},
+		{name: "missing client_id", mutate: func(c jwt.MapClaims) { delete(c, "client_id") }},
+		{name: "client_id differs from audience", mutate: func(c jwt.MapClaims) { c["client_id"] = "other_client" }},
+		{name: "missing jti", mutate: func(c jwt.MapClaims) { delete(c, "jti") }},
+		{name: "missing iat", mutate: func(c jwt.MapClaims) { delete(c, "iat") }},
 		{name: "bad signature", signer: other},
 	}
 	for _, tc := range tests {
@@ -294,13 +310,173 @@ func TestIntrospection(t *testing.T) {
 	}
 }
 
-func TestCustomSubjectClaim(t *testing.T) {
+func timeNow() time.Time { return time.Now().Truncate(time.Second) }
+
+func TestNbfIsOptional(t *testing.T) {
 	k := newSigner(t, "k1")
 	env := newEnv(t, k)
-	v := env.verifier(func(o *Options) { o.SubjectClaim = "client_id"; o.AllowedSubject = testAudience })
-	if _, err := v.Verify(context.Background(), sign(t, k, env.kanidmClaims(), "at+jwt"), nil); err != nil {
+	c := env.kanidmClaims()
+	delete(c, "nbf")
+	if _, err := env.verifier(nil).Verify(context.Background(), sign(t, k, c, "at+jwt"), nil); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func timeNow() time.Time { return time.Now().Truncate(time.Second) }
+func TestStaleJWKSGraceThenFailClosed(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	v := env.verifier(func(o *Options) { o.JWKSMaxAge = time.Hour; o.JWKSGrace = 10 * time.Minute })
+	verify := func() error {
+		_, err := v.Verify(context.Background(), sign(t, k, env.kanidmClaims(), "at+jwt"), nil)
+		return err
+	}
+	if err := verify(); err != nil {
+		t.Fatal(err)
+	}
+	// The key server breaks for good.
+	env.fail.Store(true)
+	env.now = env.now.Add(time.Hour + 5*time.Minute) // past soft expiry, inside grace
+	if err := verify(); err != nil {
+		t.Fatalf("inside grace: %v", err)
+	}
+	env.now = env.now.Add(6 * time.Minute) // past soft expiry + grace
+	err := verify()
+	if err == nil || errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("after grace: err = %v, want fail-closed unavailable error", err)
+	}
+	// Once the key server answers again, verification recovers.
+	env.fail.Store(false)
+	env.now = env.now.Add(time.Minute)
+	if err := verify(); err != nil {
+		t.Fatalf("after recovery: %v", err)
+	}
+}
+
+func TestStaleJWKSDropsRemovedKey(t *testing.T) {
+	k1, k2 := newSigner(t, "k1"), newSigner(t, "k2")
+	env := newEnv(t, k1)
+	v := env.verifier(nil)
+	if _, err := v.Verify(context.Background(), sign(t, k1, env.kanidmClaims(), "at+jwt"), nil); err != nil {
+		t.Fatal(err)
+	}
+	env.setKeys(k2) // k1 retired at the authorization server
+	env.now = env.now.Add(61 * time.Minute)
+	if _, err := v.Verify(context.Background(), sign(t, k1, env.kanidmClaims(), "at+jwt"), nil); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("retired key still accepted: %v", err)
+	}
+}
+
+func TestJWKSOutageIsThrottled(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	env.fail.Store(true)
+	v := env.verifier(nil)
+	tok := sign(t, k, env.kanidmClaims(), "at+jwt")
+	for range 3 {
+		if _, err := v.Verify(context.Background(), tok, nil); err == nil || errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	if n := env.fetches.Load(); n != 1 {
+		t.Fatalf("fetches during outage = %d, want 1", n)
+	}
+	env.fail.Store(false)
+	env.now = env.now.Add(31 * time.Second)
+	tok = sign(t, k, env.kanidmClaims(), "at+jwt")
+	if _, err := v.Verify(context.Background(), tok, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := env.fetches.Load(); n != 2 {
+		t.Fatalf("fetches = %d, want 2", n)
+	}
+}
+
+func TestConcurrentMissesShareOneFetch(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	env.gate = make(chan struct{})
+	v := env.verifier(nil)
+	tok := sign(t, k, env.kanidmClaims(), "at+jwt")
+
+	const n = 20
+	errs := make(chan error, n)
+	for range n {
+		go func() {
+			_, err := v.Verify(context.Background(), tok, nil)
+			errs <- err
+		}()
+	}
+	// Let the single fetch through once it has started.
+	for env.fetches.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // give the others time to queue up
+	close(env.gate)
+	for range n {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := env.fetches.Load(); got != 1 {
+		t.Fatalf("fetches = %d, want 1", got)
+	}
+}
+
+func TestCancelledRequestDoesNotWasteRefresh(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	env.gate = make(chan struct{})
+	v := env.verifier(nil)
+	tok := sign(t, k, env.kanidmClaims(), "at+jwt")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := v.Verify(ctx, tok, nil)
+		done <- err
+	}()
+	for env.fetches.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel() // the client goes away mid-fetch
+	if err := <-done; err == nil {
+		t.Fatal("cancelled request succeeded")
+	}
+	close(env.gate) // the detached fetch completes and fills the cache
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := v.Verify(context.Background(), tok, nil); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("cache never filled: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := env.fetches.Load(); got != 1 {
+		t.Fatalf("fetches = %d, want 1 (no refetch after cancellation)", got)
+	}
+}
+
+func TestIntrospectionDoesNotFollowRedirects(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	var leaked atomic.Bool
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { leaked.Store(true) }))
+	defer elsewhere.Close()
+	intro := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL, http.StatusTemporaryRedirect)
+	}))
+	defer intro.Close()
+	v := env.verifier(func(o *Options) { o.IntrospectionURL = intro.URL })
+	_, err := v.Verify(context.Background(), sign(t, k, env.kanidmClaims(), "at+jwt"), nil)
+	if err == nil || leaked.Load() {
+		t.Fatalf("err = %v, leaked = %v", err, leaked.Load())
+	}
+}
+
+func TestIntrospectionCacheTTLIsCapped(t *testing.T) {
+	v := New(Options{IntrospectionCacheTTL: time.Hour})
+	if v.opts.IntrospectionCacheTTL != MaxIntrospectionCacheTTL {
+		t.Fatalf("ttl = %v", v.opts.IntrospectionCacheTTL)
+	}
+}

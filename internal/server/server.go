@@ -69,7 +69,6 @@ func Verifiers(cfg *config.Config, log *slog.Logger) map[string]auth.TokenVerifi
 			Issuer:           cn.Issuer,
 			Audience:         cn.Audience,
 			JWKSURL:          cn.JWKSURL,
-			SubjectClaim:     cfg.OAuthSubjectClaim,
 			AllowedSubject:   cfg.OAuthAllowedSubject,
 			IntrospectionURL: cfg.OAuthIntrospectionURL,
 			Logger:           log.With("connector", cn.Name),

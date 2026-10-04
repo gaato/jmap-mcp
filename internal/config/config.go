@@ -35,7 +35,6 @@ type Config struct {
 
 	// Shared by all connectors.
 	OAuthAllowedSubject   string
-	OAuthSubjectClaim     string
 	OAuthIntrospectionURL string
 
 	JMAPSessionURL string
@@ -46,6 +45,8 @@ type Config struct {
 // MetadataPrefix is the RFC 9728 well-known path. Only the path-suffixed
 // form exists; the bare prefix is deliberately not served.
 const MetadataPrefix = "/.well-known/oauth-protected-resource"
+
+var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 var connectorName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
@@ -88,8 +89,7 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 	c := &Config{
 		ListenAddr:            opt("LISTEN_ADDR", ":8080"),
 		OAuthAllowedSubject:   req("OAUTH_ALLOWED_SUBJECT"),
-		OAuthSubjectClaim:     opt("OAUTH_SUBJECT_CLAIM", "sub"),
-		OAuthIntrospectionURL: opt("OAUTH_INTROSPECTION_URL", ""),
+		OAuthIntrospectionURL: req("OAUTH_INTROSPECTION_URL"),
 		JMAPSessionURL:        req("JMAP_SESSION_URL"),
 		JMAPUsername:          req("JMAP_USERNAME"),
 	}
@@ -100,6 +100,9 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		} else {
 			c.PublicBaseURL = base.Scheme + "://" + base.Host
 		}
+	}
+	if c.OAuthAllowedSubject != "" && !uuidRE.MatchString(c.OAuthAllowedSubject) {
+		errs = append(errs, errors.New("OAUTH_ALLOWED_SUBJECT must be a lowercase hyphenated UUID (the Kanidm account uuid)"))
 	}
 	absURL("JMAP_SESSION_URL", c.JMAPSessionURL)
 	absURL("OAUTH_INTROSPECTION_URL", c.OAuthIntrospectionURL)

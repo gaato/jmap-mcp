@@ -56,16 +56,30 @@ none); a mailbox item has no public web URL.
 - **Tokens must be issued for this endpoint.** Every request to an MCP endpoint
   needs `Authorization: Bearer <token>`. The token must be a JWS with header
   `typ: at+jwt` (rejects ID tokens), signed ES256 (or RS256) by a key from the
-  connector's JWKS (cached per connector; refetched on an unknown `kid`, rate
-  limited), with `iss` equal to the connector's issuer, `aud` containing the
-  connector's audience, valid
-  `exp`/`nbf`/`iat` (30 s leeway), scope `mail_read`, and the subject claim
-  equal to `OAUTH_ALLOWED_SUBJECT`. Optionally the token is checked at the
-  introspection endpoint to catch revoked sessions (cached for a minute).
-  - Kanidm sets `aud` to the OAuth2 client name, not the MCP URL, and ignores
-    the RFC 8707 `resource` parameter; per-client issuers and the audience pin
-    together make sure the token was minted for this client.
-  - Kanidm access tokens carry no username or email; `sub` is the account UUID.
+  connector's JWKS, and carry the RFC 9068 claims `iss` (equal to the
+  connector's issuer), `aud` (containing the connector's audience), `sub`,
+  `client_id`, `iat`, `jti` and `exp` (`nbf` optional; 30 s leeway). `sub` must
+  equal `OAUTH_ALLOWED_SUBJECT` exactly; `client_id` must equal the audience
+  (Kanidm sets both to the client name). Scope `mail_read` is required.
+- **Revocation.** Every token is also checked at Kanidm's introspection
+  endpoint; a positive answer is cached for at most 60 s per session, so a
+  revoked session stops working within a minute.
+- **Signing keys.** JWKS is cached per connector and refetched after an hour
+  or when an unknown `kid` shows up. Refetches are throttled to one per 30 s
+  (also while no keys are cached), shared between concurrent requests and
+  detached from the client's request. If refreshing fails, cached keys stay
+  usable for a 10 minute grace period and then verification fails closed.
+  JWKS and introspection requests never follow redirects. When the key server
+  or introspection endpoint is unavailable the MCP endpoint answers `503`.
+- **Kanidm conformance exception (RFC 8707).** The MCP authorization spec asks
+  for tokens bound to the resource via RFC 8707 `resource`. Kanidm ignores
+  `resource` and sets `aud` to the OAuth2 client name, so binding relies on the
+  per-client issuer plus the audience pin instead. This only works if each
+  OAuth2 client is used by exactly one connector of exactly one deployment:
+  create one Kanidm client per connector per environment and never reuse a
+  client elsewhere (another deployment accepting the same client's tokens
+  would accept tokens minted for this one, and vice versa).
+- Kanidm access tokens carry no username or email; `sub` is the account UUID.
 - **No token passthrough.** The client's token is never sent to JMAP (which
   uses Basic auth with the App Password) and only ever leaves the process
   towards the introspection endpoint of the issuing server.
@@ -93,9 +107,8 @@ none); a mailbox item has no public web URL.
 | `CONNECTOR_<NAME>_ISSUER` | yes | Exact `iss` for that connector, e.g. `https://id.home.gaato.net/oauth2/openid/mcp-jmap-claude`. `<NAME>` is the name upper-cased with `-` → `_`. |
 | `CONNECTOR_<NAME>_AUDIENCE` | yes | Required `aud`; for Kanidm the client name, e.g. `mcp-jmap-claude` |
 | `CONNECTOR_<NAME>_JWKS_URL` | no | Default `<issuer>/public_key.jwk` |
-| `OAUTH_ALLOWED_SUBJECT` | yes | The only user allowed in, for all connectors (Kanidm: the person's UUID) |
-| `OAUTH_SUBJECT_CLAIM` | no | Claim compared with `OAUTH_ALLOWED_SUBJECT`, default `sub` |
-| `OAUTH_INTROSPECTION_URL` | no | e.g. `https://id.home.gaato.net/oauth2/token/introspect` (shared; no client auth needed with Kanidm) |
+| `OAUTH_ALLOWED_SUBJECT` | yes | The only user allowed in, for all connectors: the Kanidm account UUID, lowercase with hyphens, compared exactly with `sub` |
+| `OAUTH_INTROSPECTION_URL` | yes | e.g. `https://id.home.gaato.net/oauth2/token/introspect` (shared; no client auth needed with Kanidm) |
 | `JMAP_SESSION_URL` | yes | e.g. `https://mail.example.net/.well-known/jmap` (redirects are followed; the primary mail account is used) |
 | `JMAP_USERNAME` | yes | JMAP login |
 | `JMAP_PASSWORD_FILE` | yes | File containing the App Password (trailing newline ignored) |
