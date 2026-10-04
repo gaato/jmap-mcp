@@ -313,8 +313,10 @@ func (c *Client) call(ctx context.Context, calls ...invocation) (map[string]json
 // EmailURL returns a citation URL for an email: an RFC 2392 "mid:" URL when
 // the message has a Message-ID. No public web URL exists for a mailbox item.
 func EmailURL(messageIDs []string) string {
-	if len(messageIDs) == 0 || messageIDs[0] == "" {
+	if len(messageIDs) == 0 || messageIDs[0] == "" || len(messageIDs[0]) > 250 {
 		return ""
 	}
+	// PathEscape percent-encodes everything outside unreserved ASCII,
+	// including control and invisible characters.
 	return "mid:" + url.PathEscape(messageIDs[0])
 }

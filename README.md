@@ -98,14 +98,31 @@ none); a mailbox item has no public web URL.
   `error="invalid_token"` when a token was sent); a token without the scope
   gets `403` with `error="insufficient_scope"`. Rejection reasons are logged,
   not returned.
-- **Email content is untrusted.** Bodies are returned as plain text (HTML is
-  crudely stripped; `textBody` is preferred), capped, and wrapped in
-  `<<<BEGIN/END UNTRUSTED EMAIL CONTENT nonce>>>` markers with a per-call random
-  nonce so a message cannot fake the end marker. Results carry a notice telling
-  the model to treat message-derived fields as data. Nothing in a message is
-  ever fetched or followed.
-- **Logs** contain method, path, status, duration and rejection reasons; never
-  tokens, passwords or message content.
+- **Email content is untrusted.**
+  - Bodies are plain text: `textBody` is preferred; HTML is converted with the
+    HTML5 parser (`golang.org/x/net/html`), keeping only visible text. Scripts,
+    styles, `head`, `template`, `noscript`, `title`, `svg`, `textarea`,
+    `iframe`, `object` and elements marked `hidden`, `aria-hidden="true"` or
+    hidden by inline style (`display:none`, `visibility:hidden`,
+    `font-size:0`, zero width/height, …; best effort) are dropped. Link
+    targets are never shown, resolved or fetched.
+  - Bodies are capped and wrapped in
+    `<<<BEGIN/END UNTRUSTED EMAIL CONTENT nonce>>>` markers with a per-call
+    random nonce; `<<<` and `>>>` inside the content are replaced with
+    `‹‹‹`/`›››` (after entity decoding), so a message cannot fake a marker.
+  - Invisible characters (Unicode format characters such as zero-width and
+    bidi controls, tag characters, variation selectors, fillers,
+    noncharacters; ZWJ is kept for emoji) and control characters are removed
+    from bodies and from every field outside the markers.
+  - Address lists are capped at 10 entries / about 1000 characters each
+    (`(and N more)`); subjects, names and previews are length-capped.
+  - Results carry a notice, and every tool description says which fields are
+    untrusted third-party data. `search` results follow the ChatGPT contract
+    exactly (`results: [{id, title, url}]`, no room for an extra field), so
+    their titles start with `[untrusted email]` instead.
+- **Logs** contain method, path, status, duration and rejection reasons, and
+  for JMAP failures only the method, error type and HTTP status; never
+  tokens, passwords, message content or upstream error descriptions.
 
 ## Configuration
 
