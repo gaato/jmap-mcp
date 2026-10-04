@@ -194,7 +194,12 @@ podman build --platform linux/amd64,linux/arm64 --manifest localhost/jmap-mcp .
 ```
 
 The image is a static (`CGO_ENABLED=0`) binary on `distroless/static`,
-running as UID 65532.
+running as UID 65532. Both base images are pinned by digest in the
+`Containerfile`; refresh them with `skopeo inspect --format '{{.Digest}}'`.
+
+The HTTP server uses a 30 s read timeout, 90 s write timeout (above the 30 s
+JMAP timeout; stateless responses end with their tool call), 64 KiB header
+limit and 256 KiB MCP request body limit.
 
 ### Quadlet example
 

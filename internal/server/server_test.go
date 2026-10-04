@@ -336,3 +336,37 @@ func TestNewRequiresVerifierPerConnector(t *testing.T) {
 		t.Fatal("expected error for missing verifier")
 	}
 }
+
+func TestHTTPServerLimits(t *testing.T) {
+	s := HTTPServer(":0", http.NotFoundHandler())
+	if s.ReadTimeout != 30*time.Second || s.WriteTimeout != 90*time.Second ||
+		s.ReadHeaderTimeout == 0 || s.IdleTimeout == 0 || s.MaxHeaderBytes != 64<<10 {
+		t.Fatalf("server = %+v", s)
+	}
+}
+
+func TestRequestBodyLimit(t *testing.T) {
+	f := setup(t)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"` + strings.Repeat("x", MaxRequestBodyBytes) + `"}}`
+	req, _ := http.NewRequest(http.MethodPost, f.srv.URL+"/claude/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+f.claude.token(t, "mail_read"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d, want 413", resp.StatusCode)
+	}
+}
+
+func TestKeyServerOutageIs503(t *testing.T) {
+	f := setup(t)
+	f.claude.jwks.Close() // key server gone before the first request
+	resp := f.post(t, "/claude/mcp", f.claude.token(t, "mail_read"))
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", resp.StatusCode)
+	}
+}

@@ -18,6 +18,24 @@ import (
 // Version is reported to MCP clients.
 var Version = "dev"
 
+// MaxRequestBodyBytes bounds MCP request bodies.
+const MaxRequestBodyBytes = 256 << 10
+
+// HTTPServer returns an http.Server with conservative limits. WriteTimeout
+// is well above the JMAP client's 30 s timeout: in stateless mode each POST's
+// response (JSON or a short SSE stream) ends when its tool call returns.
+func HTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      90 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
+}
+
 // New returns the HTTP handler for the whole server. verifiers maps each
 // connector name to the token verifier for that connector's OAuth client;
 // every connector in cfg must have one.
@@ -37,6 +55,10 @@ func New(cfg *config.Config, verifiers map[string]auth.TokenVerifier, tools *mai
 			// carry a valid bearer token, which a rebinding attacker cannot
 			// obtain, so the guard adds nothing here.
 			DisableLocalhostProtection: true,
+			// Tool calls are tiny JSON-RPC messages.
+			MaxRequestBodyBytes: MaxRequestBodyBytes,
+			// Stop work for clients that went away (protocol >= 2026-07-28).
+			PropagateRequestCancellation: true,
 		})
 
 	// The bare /.well-known/oauth-protected-resource is intentionally not
