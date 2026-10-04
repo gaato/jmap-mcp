@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/gaato/jmap-mcp/internal/urlpolicy"
 )
 
 const (
@@ -67,10 +69,16 @@ func (e *MethodError) Error() string {
 }
 
 // Client talks to a single JMAP account using HTTP Basic authentication.
+//
+// Credentials only ever go to the allowed origins: the session URL's origin
+// and an optional extra origin. Every redirect hop and the session's apiUrl
+// are checked against them (which also rules out https to http downgrades)
+// and against urlpolicy.
 type Client struct {
 	sessionURL string
 	username   string
 	password   string
+	allowed    map[string]bool
 	hc         *http.Client
 
 	mu      sync.Mutex
@@ -83,12 +91,45 @@ type session struct {
 	state     string
 }
 
-// NewClient returns a client. hc may be nil.
-func NewClient(sessionURL, username, password string, hc *http.Client) *Client {
-	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+// NewClient returns a client. extraOrigin may be empty.
+func NewClient(sessionURL, extraOrigin, username, password string) (*Client, error) {
+	su, err := urlpolicy.Parse(sessionURL)
+	if err != nil {
+		return nil, fmt.Errorf("jmap: session URL %w", err)
 	}
-	return &Client{sessionURL: sessionURL, username: username, password: password, hc: hc}
+	c := &Client{
+		sessionURL: sessionURL,
+		username:   username,
+		password:   password,
+		allowed:    map[string]bool{urlpolicy.Origin(su): true},
+	}
+	if extraOrigin != "" {
+		eu, err := urlpolicy.Parse(extraOrigin)
+		if err != nil {
+			return nil, fmt.Errorf("jmap: allowed origin %w", err)
+		}
+		c.allowed[urlpolicy.Origin(eu)] = true
+	}
+	c.hc = &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("jmap: too many redirects")
+			}
+			return c.checkURL(req.URL)
+		},
+	}
+	return c, nil
+}
+
+func (c *Client) checkURL(u *url.URL) error {
+	if err := urlpolicy.Check(u); err != nil {
+		return fmt.Errorf("jmap: refusing URL: %w", err)
+	}
+	if !c.allowed[urlpolicy.Origin(u)] {
+		return fmt.Errorf("jmap: refusing URL on origin %s (not the configured JMAP origin)", urlpolicy.Origin(u))
+	}
+	return nil
 }
 
 func (c *Client) getSession(ctx context.Context) (*session, error) {
@@ -127,6 +168,9 @@ func (c *Client) getSession(ctx context.Context) (*session, error) {
 	api, err := resp.Request.URL.Parse(doc.APIURL)
 	if err != nil {
 		return nil, fmt.Errorf("jmap: bad apiUrl: %w", err)
+	}
+	if err := c.checkURL(api); err != nil {
+		return nil, fmt.Errorf("session apiUrl: %w", err)
 	}
 	c.session = &session{apiURL: api.String(), accountID: acct, state: doc.State}
 	return c.session, nil

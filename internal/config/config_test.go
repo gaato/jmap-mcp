@@ -130,3 +130,71 @@ func TestFromEnvConnectorErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestFromEnvRequiresHTTPS(t *testing.T) {
+	for _, name := range []string{"PUBLIC_BASE_URL", "CONNECTOR_CLAUDE_ISSUER", "CONNECTOR_CHATGPT_JWKS_URL",
+		"OAUTH_INTROSPECTION_URL", "JMAP_SESSION_URL", "JMAP_ALLOWED_ORIGIN"} {
+		t.Run(name, func(t *testing.T) {
+			e := validEnv(t)
+			e[name] = "http://plain.example.net"
+			_, err := FromEnv(env(e))
+			if err == nil || !strings.Contains(err.Error(), name+" must use https") {
+				t.Fatalf("err = %v", err)
+			}
+			e[name] = "https://user:pw@id.example.net"
+			if _, err := FromEnv(env(e)); err == nil || !strings.Contains(err.Error(), name+" must not contain credentials") {
+				t.Fatalf("userinfo: err = %v", err)
+			}
+		})
+	}
+	e := validEnv(t)
+	e["JMAP_SESSION_URL"] = "https://mail.example.net/.well-known/jmap#x"
+	if _, err := FromEnv(env(e)); err == nil || !strings.Contains(err.Error(), "fragment") {
+		t.Fatalf("fragment: err = %v", err)
+	}
+}
+
+func TestFromEnvAllowsLoopbackHTTP(t *testing.T) {
+	e := validEnv(t)
+	e["PUBLIC_BASE_URL"] = "http://localhost:8080"
+	e["JMAP_SESSION_URL"] = "http://127.0.0.1:8081/.well-known/jmap"
+	e["OAUTH_INTROSPECTION_URL"] = "http://[::1]:8443/oauth2/token/introspect"
+	e["JMAP_ALLOWED_ORIGIN"] = "https://Mail.Example.net:443"
+	c, err := FromEnv(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.JMAPAllowedOrigin != "https://mail.example.net" {
+		t.Fatalf("origin = %q", c.JMAPAllowedOrigin)
+	}
+}
+
+func TestPasswordFileChecks(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good")
+	open := filepath.Join(dir, "open")
+	link := filepath.Join(dir, "link")
+	_ = os.WriteFile(good, []byte("pw\n"), 0o400)
+	_ = os.WriteFile(open, []byte("pw\n"), 0o640)
+	_ = os.Symlink(good, link)
+	cases := map[string]string{
+		good: "",
+		open: "too open",
+		link: "symlink",
+		dir:  "regular file",
+	}
+	for path, want := range cases {
+		e := validEnv(t)
+		e["JMAP_PASSWORD_FILE"] = path
+		_, err := FromEnv(env(e))
+		if want == "" {
+			if err != nil {
+				t.Errorf("%s: %v", path, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", path, err, want)
+		}
+	}
+}

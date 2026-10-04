@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gaato/jmap-mcp/internal/jmap"
@@ -17,7 +18,7 @@ func newClient(t *testing.T) (*jmap.Client, *jmaptest.Server) {
 	t.Helper()
 	srv := jmaptest.New()
 	t.Cleanup(srv.Close)
-	return jmap.NewClient(srv.SessionURL(), jmaptest.Username, jmaptest.Password, nil), srv
+	return jmaptest.MustClient(t, srv.SessionURL(), jmaptest.Username, jmaptest.Password), srv
 }
 
 func TestSessionDiscoveryAndMailboxes(t *testing.T) {
@@ -130,7 +131,7 @@ func TestMethodErrorMapping(t *testing.T) {
 func TestBadCredentials(t *testing.T) {
 	srv := jmaptest.New()
 	defer srv.Close()
-	c := jmap.NewClient(srv.SessionURL(), jmaptest.Username, "wrong", nil)
+	c := jmaptest.MustClient(t, srv.SessionURL(), jmaptest.Username, "wrong")
 	if _, err := c.Mailboxes(context.Background()); !errors.Is(err, jmap.ErrUnauthorized) {
 		t.Fatalf("err = %v", err)
 	}
@@ -147,7 +148,7 @@ func TestRequestErrorProblemJSON(t *testing.T) {
 		_, _ = w.Write([]byte(`{"type":"urn:ietf:params:jmap:error:limit","status":400,"detail":"too many"}`))
 	}))
 	defer srv.Close()
-	c := jmap.NewClient(srv.URL+"/session", "u", "p", nil)
+	c := jmaptest.MustClient(t, srv.URL+"/session", "u", "p")
 	_, err := c.Mailboxes(context.Background())
 	var re *jmap.RequestError
 	if !errors.As(err, &re) || re.Status != 400 || re.Type != "urn:ietf:params:jmap:error:limit" {
@@ -160,7 +161,7 @@ func TestSessionWithoutMailAccount(t *testing.T) {
 		_, _ = w.Write([]byte(`{"apiUrl":"/api","primaryAccounts":{},"state":"x"}`))
 	}))
 	defer srv.Close()
-	c := jmap.NewClient(srv.URL, "u", "p", nil)
+	c := jmaptest.MustClient(t, srv.URL, "u", "p")
 	if _, err := c.Mailboxes(context.Background()); err == nil || !strings.Contains(err.Error(), "primary mail account") {
 		t.Fatalf("err = %v", err)
 	}
@@ -172,5 +173,82 @@ func TestEmailURL(t *testing.T) {
 	}
 	if got := jmap.EmailURL(nil); got != "" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// recorder counts requests and whether they carried credentials.
+func recorder(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{"apiUrl":"/api","primaryAccounts":{"urn:ietf:params:jmap:mail":"a"},"state":"x","methodResponses":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+func TestAPIURLOnOtherOriginRefused(t *testing.T) {
+	other, hits := recorder(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"apiUrl":"` + other.URL + `/api","primaryAccounts":{"urn:ietf:params:jmap:mail":"a"},"state":"x"}`))
+	}))
+	defer srv.Close()
+	c := jmaptest.MustClient(t, srv.URL, "u", "p")
+	if _, err := c.Mailboxes(context.Background()); err == nil || !strings.Contains(err.Error(), "not the configured JMAP origin") {
+		t.Fatalf("err = %v", err)
+	}
+	if hits.Load() != 0 {
+		t.Fatal("credentials were sent to the other origin")
+	}
+}
+
+func TestPlainHTTPAPIURLRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"apiUrl":"http://mail.example.net/api","primaryAccounts":{"urn:ietf:params:jmap:mail":"a"},"state":"x"}`))
+	}))
+	defer srv.Close()
+	c := jmaptest.MustClient(t, srv.URL, "u", "p")
+	if _, err := c.Mailboxes(context.Background()); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRedirectToOtherOriginRefused(t *testing.T) {
+	other, hits := recorder(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/jmap/session", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := jmaptest.MustClient(t, srv.URL+"/.well-known/jmap", "u", "p")
+	if _, err := c.Mailboxes(context.Background()); err == nil || !strings.Contains(err.Error(), "not the configured JMAP origin") {
+		t.Fatalf("err = %v", err)
+	}
+	if hits.Load() != 0 {
+		t.Fatal("redirect to another origin was followed")
+	}
+}
+
+func TestRedirectToExplicitlyAllowedOrigin(t *testing.T) {
+	mail := jmaptest.New()
+	defer mail.Close()
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, mail.URL+"/jmap/session", http.StatusTemporaryRedirect)
+	}))
+	defer front.Close()
+	c, err := jmap.NewClient(front.URL+"/.well-known/jmap", mail.URL, jmaptest.Username, jmaptest.Password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Mailboxes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewClientRejectsPlainHTTP(t *testing.T) {
+	if _, err := jmap.NewClient("http://mail.example.net/.well-known/jmap", "", "u", "p"); err == nil {
+		t.Fatal("plain http session URL accepted")
+	}
+	if _, err := jmap.NewClient("https://mail.example.net/.well-known/jmap", "http://other.example.net", "u", "p"); err == nil {
+		t.Fatal("plain http extra origin accepted")
 	}
 }

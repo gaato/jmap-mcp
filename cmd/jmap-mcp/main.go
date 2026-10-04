@@ -32,7 +32,10 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	mail := jmap.NewClient(cfg.JMAPSessionURL, cfg.JMAPUsername, cfg.JMAPPassword, nil)
+	mail, err := jmap.NewClient(cfg.JMAPSessionURL, cfg.JMAPAllowedOrigin, cfg.JMAPUsername, cfg.JMAPPassword)
+	if err != nil {
+		return err
+	}
 	handler, err := server.New(cfg, server.Verifiers(cfg, log), mailtools.New(mail, log), log)
 	if err != nil {
 		return err

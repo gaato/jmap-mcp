@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gaato/jmap-mcp/internal/jmap"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -491,16 +492,27 @@ func (t *Tools) resolveMailbox(ctx context.Context, q string) (string, error) {
 }
 
 // toolError converts a backend error into a message safe to show the model
-// and logs the details.
+// and logs it. Upstream description/detail text is never logged or returned:
+// only the JMAP method, error type and HTTP status.
 func (t *Tools) toolError(ctx context.Context, tool string, err error) error {
-	t.log.WarnContext(ctx, "tool failed", "tool", tool, "error", err)
+	attrs := []any{"tool", tool}
 	var me *jmap.MethodError
+	var re *jmap.RequestError
 	switch {
 	case errors.As(err, &me):
-		if me.Type == "notFound" || me.Type == "invalidArguments" {
-			return fmt.Errorf("mail server: %s (%s)", me.Type, cleanLine(me.Description, 200))
-		}
-		return fmt.Errorf("mail server error: %s", me.Type)
+		attrs = append(attrs, "jmap_method", me.Method, "jmap_error", errType(me.Type))
+	case errors.As(err, &re):
+		attrs = append(attrs, "http_status", re.Status, "jmap_error", errType(re.Type))
+	case errors.Is(err, jmap.ErrUnauthorized):
+		attrs = append(attrs, "jmap_error", "unauthorized")
+	default:
+		attrs = append(attrs, "error", err.Error())
+	}
+	t.log.WarnContext(ctx, "tool failed", attrs...)
+
+	switch {
+	case me != nil:
+		return fmt.Errorf("mail server error: %s", errType(me.Type))
 	case errors.Is(err, jmap.ErrUnauthorized):
 		return errors.New("mail server rejected this connector's credentials")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -508,4 +520,21 @@ func (t *Tools) toolError(ctx context.Context, tool string, err error) error {
 	default:
 		return errors.New("mail server request failed")
 	}
+}
+
+// errType reduces an upstream error type to a short identifier.
+func errType(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x80 && (r == ':' || r == '.' || r == '_' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			return r
+		}
+		return -1
+	}, s)
+	if len(s) > 80 {
+		s = s[:80]
+	}
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }

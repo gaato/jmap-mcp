@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/gaato/jmap-mcp/internal/config"
-	"github.com/gaato/jmap-mcp/internal/jmap"
 	"github.com/gaato/jmap-mcp/internal/jmap/jmaptest"
 	"github.com/gaato/jmap-mcp/internal/mailtools"
 	"github.com/golang-jwt/jwt/v5"
@@ -125,7 +124,7 @@ func setup(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.DiscardHandler)
-	tools := mailtools.New(jmap.NewClient(cfg.JMAPSessionURL, cfg.JMAPUsername, cfg.JMAPPassword, nil), log)
+	tools := mailtools.New(jmaptest.MustClient(t, cfg.JMAPSessionURL, cfg.JMAPUsername, cfg.JMAPPassword), log)
 	h, err := New(cfg, Verifiers(cfg, log), tools, log)
 	if err != nil {
 		t.Fatal(err)

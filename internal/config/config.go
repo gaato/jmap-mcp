@@ -8,6 +8,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/gaato/jmap-mcp/internal/urlpolicy"
 )
 
 // Connector is one MCP client application (e.g. Claude or ChatGPT) with its
@@ -38,8 +40,11 @@ type Config struct {
 	OAuthIntrospectionURL string
 
 	JMAPSessionURL string
-	JMAPUsername   string
-	JMAPPassword   string
+	// JMAPAllowedOrigin is an optional second origin (besides the session
+	// URL's) that redirects and the session's apiUrl may point to.
+	JMAPAllowedOrigin string
+	JMAPUsername      string
+	JMAPPassword      string
 }
 
 // MetadataPrefix is the RFC 9728 well-known path. Only the path-suffixed
@@ -78,9 +83,9 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		if v == "" {
 			return nil
 		}
-		u, err := url.Parse(v)
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-			errs = append(errs, fmt.Errorf("%s must be an absolute http(s) URL", name))
+		u, err := urlpolicy.Parse(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s %w", name, err))
 			return nil
 		}
 		return u
@@ -95,8 +100,8 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 	}
 
 	if base := absURL("PUBLIC_BASE_URL", req("PUBLIC_BASE_URL")); base != nil {
-		if (base.Path != "" && base.Path != "/") || base.RawQuery != "" || base.Fragment != "" || base.User != nil {
-			errs = append(errs, errors.New("PUBLIC_BASE_URL must be scheme://host[:port] without path, query or credentials"))
+		if (base.Path != "" && base.Path != "/") || base.RawQuery != "" {
+			errs = append(errs, errors.New("PUBLIC_BASE_URL must be scheme://host[:port] without path or query"))
 		} else {
 			c.PublicBaseURL = base.Scheme + "://" + base.Host
 		}
@@ -105,6 +110,15 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		errs = append(errs, errors.New("OAUTH_ALLOWED_SUBJECT must be a lowercase hyphenated UUID (the Kanidm account uuid)"))
 	}
 	absURL("JMAP_SESSION_URL", c.JMAPSessionURL)
+	if v := opt("JMAP_ALLOWED_ORIGIN", ""); v != "" {
+		if u := absURL("JMAP_ALLOWED_ORIGIN", v); u != nil {
+			if (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
+				errs = append(errs, errors.New("JMAP_ALLOWED_ORIGIN must be scheme://host[:port] without path or query"))
+			} else {
+				c.JMAPAllowedOrigin = urlpolicy.Origin(u)
+			}
+		}
+	}
 	absURL("OAUTH_INTROSPECTION_URL", c.OAuthIntrospectionURL)
 
 	seenName := map[string]bool{}
@@ -159,15 +173,11 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 	}
 
 	if pwFile := req("JMAP_PASSWORD_FILE"); pwFile != "" {
-		b, err := os.ReadFile(pwFile)
-		switch {
-		case err != nil:
+		pw, err := readSecretFile(pwFile)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("JMAP_PASSWORD_FILE: %w", err))
-		case strings.TrimSpace(string(b)) == "":
-			errs = append(errs, errors.New("JMAP_PASSWORD_FILE is empty"))
-		default:
-			c.JMAPPassword = strings.TrimRight(string(b), "\r\n")
 		}
+		c.JMAPPassword = pw
 	}
 
 	if err := errors.Join(errs...); err != nil {
@@ -179,4 +189,30 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		cn.ResourceMetadataURL = c.PublicBaseURL + cn.MetadataPath
 	}
 	return c, nil
+}
+
+// readSecretFile reads a secret from a regular, non-symlink file that is not
+// readable or writable by group or others.
+func readSecretFile(path string) (string, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
+		return "", errors.New("must not be a symlink")
+	case !fi.Mode().IsRegular():
+		return "", errors.New("must be a regular file")
+	case fi.Mode().Perm()&0o077 != 0:
+		return "", fmt.Errorf("permissions %04o are too open; group/other must have no access (e.g. chmod 0400)", fi.Mode().Perm())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	pw := strings.TrimRight(string(b), "\r\n")
+	if strings.TrimSpace(pw) == "" {
+		return "", errors.New("is empty")
+	}
+	return pw, nil
 }

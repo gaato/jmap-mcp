@@ -83,6 +83,16 @@ none); a mailbox item has no public web URL.
 - **No token passthrough.** The client's token is never sent to JMAP (which
   uses Basic auth with the App Password) and only ever leaves the process
   towards the introspection endpoint of the issuing server.
+- **TLS only.** Every configured URL must be `https`; plain `http` is accepted
+  only for loopback hosts (`127.0.0.0/8`, `::1`, `localhost`). URLs with
+  credentials or fragments are rejected.
+- **JMAP origin pinning.** The App Password is only ever sent to the origin of
+  `JMAP_SESSION_URL` (plus `JMAP_ALLOWED_ORIGIN`, if set). Every redirect hop
+  and the session's `apiUrl` must be on an allowed origin and pass the TLS
+  rule, so a redirect or a tampered session document cannot send the
+  credentials elsewhere or over plain http.
+- **Secret file.** `JMAP_PASSWORD_FILE` must be a regular file (not a
+  symlink) with no group/other permissions (e.g. `0400`).
 - **Challenges.** `401` responses carry
   `WWW-Authenticate: Bearer resource_metadata="…", scope="mail_read"` (plus
   `error="invalid_token"` when a token was sent); a token without the scope
@@ -110,10 +120,12 @@ none); a mailbox item has no public web URL.
 | `OAUTH_ALLOWED_SUBJECT` | yes | The only user allowed in, for all connectors: the Kanidm account UUID, lowercase with hyphens, compared exactly with `sub` |
 | `OAUTH_INTROSPECTION_URL` | yes | e.g. `https://id.home.gaato.net/oauth2/token/introspect` (shared; no client auth needed with Kanidm) |
 | `JMAP_SESSION_URL` | yes | e.g. `https://mail.example.net/.well-known/jmap` (redirects are followed; the primary mail account is used) |
+| `JMAP_ALLOWED_ORIGIN` | no | A second origin (`https://host[:port]`) that redirects and the session's `apiUrl` may use, e.g. when `/.well-known/jmap` on the mail domain redirects to the JMAP host |
 | `JMAP_USERNAME` | yes | JMAP login |
-| `JMAP_PASSWORD_FILE` | yes | File containing the App Password (trailing newline ignored) |
+| `JMAP_PASSWORD_FILE` | yes | File containing the App Password (trailing newline ignored); regular file, mode `0400`/`0600` |
 
-The server refuses to start if anything required is missing or malformed, if
+All URLs must be `https` (or `http` to a loopback host). The server refuses
+to start if anything required is missing or malformed, if
 a connector is listed twice (including names that map to the same variable
 prefix, like `a-b` and `a_b`), or if two connectors share an issuer or an
 audience.

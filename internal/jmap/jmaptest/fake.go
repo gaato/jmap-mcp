@@ -2,7 +2,10 @@
 package jmaptest
 
 import (
+	"testing"
+
 	"encoding/json"
+	"github.com/gaato/jmap-mcp/internal/jmap"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -294,4 +297,14 @@ func firstN(s string, n int) string {
 		return s[:n]
 	}
 	return s
+}
+
+// MustClient returns a jmap.Client for sessionURL or fails the test.
+func MustClient(t testing.TB, sessionURL, username, password string) *jmap.Client {
+	t.Helper()
+	c, err := jmap.NewClient(sessionURL, "", username, password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
