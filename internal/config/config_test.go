@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func env(m map[string]string) func(string) string {
@@ -196,5 +198,48 @@ func TestPasswordFileChecks(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: err = %v, want %q", path, err, want)
 		}
+	}
+}
+
+func TestPasswordFileFIFOAndEmpty(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	empty := filepath.Join(dir, "empty")
+	_ = os.WriteFile(empty, []byte("\n"), 0o600)
+	for path, want := range map[string]string{fifo: "regular file", empty: "is empty"} {
+		e := validEnv(t)
+		e["JMAP_PASSWORD_FILE"] = path
+		done := make(chan error, 1)
+		go func() { _, err := FromEnv(env(e)); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: err = %v, want %q", path, err, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: reading the secret blocked", path)
+		}
+	}
+}
+
+func TestPasswordFileReadThroughDescriptor(t *testing.T) {
+	// The content returned is what the checked descriptor reads, even if
+	// the path is replaced by a symlink afterwards.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "pw")
+	_ = os.WriteFile(p, []byte("first\n"), 0o600)
+	got, err := readSecretFile(p)
+	if err != nil || got != "first" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	other := filepath.Join(dir, "other")
+	_ = os.WriteFile(other, []byte("second"), 0o644)
+	_ = os.Remove(p)
+	_ = os.Symlink(other, p)
+	if _, err := readSecretFile(p); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink swapped in: err = %v", err)
 	}
 }

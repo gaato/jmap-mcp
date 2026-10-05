@@ -97,7 +97,9 @@ none); a mailbox item has no public web URL.
   origin on another host the credentials are re-attached (net/http drops
   them on host changes).
 - **Secret file.** `JMAP_PASSWORD_FILE` must be a regular file (not a
-  symlink) with no group/other permissions (e.g. `0400`).
+  symlink) with no group/other permissions (e.g. `0400`). It is opened once
+  without following symlinks, checked with `fstat` and read from the same
+  descriptor.
 - **Challenges.** `401` responses carry
   `WWW-Authenticate: Bearer resource_metadata="…", scope="mail_read"` (plus
   `error="invalid_token"` when a token was sent); a token without the scope

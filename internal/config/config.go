@@ -4,10 +4,12 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/gaato/jmap-mcp/internal/urlpolicy"
 )
@@ -192,21 +194,30 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 }
 
 // readSecretFile reads a secret from a regular, non-symlink file that is not
-// readable or writable by group or others.
+// accessible by group or others. The file is opened once with O_NOFOLLOW
+// (and O_NONBLOCK, so a FIFO cannot hang startup); the checks use fstat on
+// that descriptor and the content is read from it, so the path cannot be
+// swapped between check and read.
 func readSecretFile(path string) (string, error) {
-	fi, err := os.Lstat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return "", errors.New("must not be a symlink")
+		}
+		return "", err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
 	switch {
-	case fi.Mode()&os.ModeSymlink != 0:
-		return "", errors.New("must not be a symlink")
 	case !fi.Mode().IsRegular():
 		return "", errors.New("must be a regular file")
 	case fi.Mode().Perm()&0o077 != 0:
 		return "", fmt.Errorf("permissions %04o are too open; group/other must have no access (e.g. chmod 0400)", fi.Mode().Perm())
 	}
-	b, err := os.ReadFile(path)
+	b, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {
 		return "", err
 	}
