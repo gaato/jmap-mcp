@@ -201,8 +201,11 @@ func (j jwk) verificationKey() (verificationKey, error) {
 		if err := errors.Join(err1, err2); err != nil {
 			return verificationKey{}, err
 		}
-		if n.BitLen() < 2048 || !e.IsInt64() || e.Int64() < 3 || e.Int64() > 1<<31 {
-			return verificationKey{}, errors.New("weak RSA key")
+		// A real RSA modulus and public exponent are always odd; reject
+		// anything else (and small or oversized values) as unusable.
+		if n.BitLen() < 2048 || n.Bit(0) == 0 ||
+			!e.IsInt64() || e.Int64() < 3 || e.Int64() > 1<<31 || e.Bit(0) == 0 {
+			return verificationKey{}, errors.New("weak or malformed RSA key")
 		}
 		return verificationKey{alg: "RS256", key: &rsa.PublicKey{N: n, E: int(e.Int64())}}, nil
 	default:

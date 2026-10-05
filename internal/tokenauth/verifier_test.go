@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -57,9 +58,10 @@ type testEnv struct {
 	mu      sync.Mutex
 	keys    []signer
 	now     time.Time
-	fail    atomic.Bool   // answer 500
-	empty   atomic.Bool   // answer an empty key set
-	gate    chan struct{} // if set, each fetch waits for a value
+	fail    atomic.Bool            // answer 500
+	empty   atomic.Bool            // answer an empty key set
+	raw     atomic.Pointer[string] // if set, answer this JWKS body
+	gate    chan struct{}          // if set, each fetch waits for a value
 }
 
 func newEnv(t *testing.T, keys ...signer) *testEnv {
@@ -71,6 +73,10 @@ func newEnv(t *testing.T, keys ...signer) *testEnv {
 		}
 		if e.fail.Load() {
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if r := e.raw.Load(); r != nil {
+			_, _ = w.Write([]byte(*r))
 			return
 		}
 		if e.empty.Load() {
@@ -627,6 +633,68 @@ func TestEmptyJWKSIsAFailedFetch(t *testing.T) {
 	// The key server starts serving an empty (unusable) set: previous keys
 	// stay valid within the grace period, then verification fails closed.
 	env.empty.Store(true)
+	env.now = env.now.Add(time.Hour + time.Minute)
+	if err := verify(); err != nil {
+		t.Fatalf("inside grace: %v", err)
+	}
+	env.now = env.now.Add(10 * time.Minute)
+	if err := verify(); err == nil || errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("after grace: err = %v, want unavailable", err)
+	}
+}
+
+func rsaJWK(kid string, n, e *big.Int) map[string]string {
+	enc := base64.RawURLEncoding.EncodeToString
+	return map[string]string{"kty": "RSA", "kid": kid, "use": "sig", "alg": "RS256", "n": enc(n.Bytes()), "e": enc(e.Bytes())}
+}
+
+func TestRSAKeyValidation(t *testing.T) {
+	odd := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 2047), big.NewInt(1))   // 2048-bit, odd
+	even := new(big.Int).Lsh(big.NewInt(1), 2047)                                   // 2048-bit, even
+	small := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 1023), big.NewInt(1)) // 1024-bit
+	cases := []struct {
+		name string
+		n, e *big.Int
+		ok   bool
+	}{
+		{"valid", odd, big.NewInt(65537), true},
+		{"even modulus", even, big.NewInt(65537), false},
+		{"even exponent", odd, big.NewInt(65536), false},
+		{"exponent 1", odd, big.NewInt(1), false},
+		{"exponent 2", odd, big.NewInt(2), false},
+		{"small modulus", small, big.NewInt(65537), false},
+		{"huge exponent", odd, new(big.Int).Lsh(big.NewInt(1), 40), false},
+	}
+	for _, tc := range cases {
+		j := rsaJWK("r", tc.n, tc.e)
+		_, err := jwk{Kty: j["kty"], Kid: j["kid"], Alg: j["alg"], N: j["n"], E: j["e"]}.verificationKey()
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v", tc.name, err)
+		}
+	}
+}
+
+func TestJWKSWithOnlyMalformedRSAKeysIsAFailedFetch(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	v := env.verifier(nil)
+	verify := func() error {
+		_, err := v.Verify(context.Background(), sign(t, k, env.kanidmClaims(), "at+jwt"), nil)
+		return err
+	}
+	if err := verify(); err != nil {
+		t.Fatal(err)
+	}
+	odd := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 2047), big.NewInt(1))
+	even := new(big.Int).Lsh(big.NewInt(1), 2047)
+	body, _ := json.Marshal(map[string]any{"keys": []map[string]string{
+		rsaJWK("bad-n", even, big.NewInt(65537)),
+		rsaJWK("bad-e", odd, big.NewInt(65536)),
+	}})
+	raw := string(body)
+	env.raw.Store(&raw)
+	// The malformed set does not replace the good key: it stays valid in the
+	// grace period, then verification fails closed (503, not 401).
 	env.now = env.now.Add(time.Hour + time.Minute)
 	if err := verify(); err != nil {
 		t.Fatalf("inside grace: %v", err)

@@ -71,7 +71,9 @@ none); a mailbox item has no public web URL.
   or when an unknown `kid` shows up. Refetches are throttled to one per 30 s
   (also while no keys are cached), shared between concurrent requests and
   detached from the client's request. If refreshing fails (including a key
-  set without any usable ES256/RS256 signing key), cached keys stay
+  set without any usable ES256/RS256 signing key; RSA keys must have a
+  modulus of at least 2048 bits and an odd modulus and exponent ≥ 3), cached
+  keys stay
   usable for a 10 minute grace period and then verification fails closed.
   JWKS and introspection requests never follow redirects. When the key server
   or introspection endpoint is unavailable the MCP endpoint answers `503`.
