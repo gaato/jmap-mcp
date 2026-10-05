@@ -62,8 +62,11 @@ none); a mailbox item has no public web URL.
   equal `OAUTH_ALLOWED_SUBJECT` exactly; `client_id` must equal the audience
   (Kanidm sets both to the client name). Scope `mail_read` is required.
 - **Revocation.** Every token is also checked at Kanidm's introspection
-  endpoint; a positive answer is cached for at most 60 s per session, so a
-  revoked session stops working within a minute.
+  endpoint. Answers are cached per token (SHA-256 of the token, bounded
+  cache): "active" for at most 60 s, so a revoked session stops working
+  within a minute, and "inactive" for up to 5 minutes, so replaying a stolen
+  revoked token does not turn into one introspection call per request.
+  Concurrent checks of the same token share one call.
 - **Signing keys.** JWKS is cached per connector and refetched after an hour
   or when an unknown `kid` shows up. Refetches are throttled to one per 30 s
   (also while no keys are cached), shared between concurrent requests and

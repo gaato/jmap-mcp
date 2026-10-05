@@ -296,17 +296,96 @@ func TestIntrospection(t *testing.T) {
 	v := env.verifier(func(o *Options) { o.IntrospectionURL = intro.URL })
 	tok := sign(t, k, env.kanidmClaims(), "at+jwt")
 
-	if _, err := v.Verify(context.Background(), tok, nil); !errors.Is(err, auth.ErrInvalidToken) {
-		t.Fatalf("revoked token accepted: %v", err)
+	// A revoked token is rejected, and replaying it does not cause more
+	// introspection calls while the negative answer is cached.
+	for range 5 {
+		if _, err := v.Verify(context.Background(), tok, nil); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("revoked token accepted: %v", err)
+		}
 	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("introspection calls = %d, want 1 (negative result cached)", n)
+	}
+
+	// A new token that is active is accepted and its answer cached too.
 	active.Store(true)
+	env.now = env.now.Add(time.Second)
+	tok2 := sign(t, k, env.kanidmClaims(), "at+jwt")
 	for range 2 {
-		if _, err := v.Verify(context.Background(), tok, nil); err != nil {
+		if _, err := v.Verify(context.Background(), tok2, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if n := calls.Load(); n != 2 {
-		t.Fatalf("introspection calls = %d, want 2 (second active result cached)", n)
+		t.Fatalf("introspection calls = %d, want 2 (active result cached)", n)
+	}
+
+	// After the negative TTL the revoked token is asked about again.
+	env.now = env.now.Add(NegativeIntrospectionCacheTTL + time.Second)
+	active.Store(false)
+	if _, err := v.Verify(context.Background(), tok, nil); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("revoked token accepted: %v", err)
+	}
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("introspection calls = %d, want 3", n)
+	}
+}
+
+func TestConcurrentIntrospectionsShareOneCall(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	intro := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		<-gate
+		_, _ = w.Write([]byte(`{"active":false}`))
+	}))
+	defer intro.Close()
+	v := env.verifier(func(o *Options) { o.IntrospectionURL = intro.URL })
+	tok := sign(t, k, env.kanidmClaims(), "at+jwt")
+	// Fill the JWKS cache first so only introspection is concurrent.
+	if _, err := v.jwks.lookup(context.Background(), "k1"); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 20
+	errs := make(chan error, n)
+	for range n {
+		go func() {
+			_, err := v.Verify(context.Background(), tok, nil)
+			errs <- err
+		}()
+	}
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(gate)
+	for range n {
+		if err := <-errs; !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("introspection calls = %d, want 1", got)
+	}
+}
+
+func TestIntrospectionCacheIsBounded(t *testing.T) {
+	now := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	in := &introspector{now: func() time.Time { return now }, positiveTTL: time.Minute,
+		negativeTTL: time.Minute, maxEntries: 3, cache: map[[32]byte]introEntry{}}
+	for i := range 100 {
+		in.store([32]byte{byte(i)}, i%2 == 0, now.Add(time.Hour))
+	}
+	if len(in.cache) > 3 {
+		t.Fatalf("cache size = %d", len(in.cache))
+	}
+	// Entries never outlive the token.
+	in.store([32]byte{200}, false, now.Add(time.Second))
+	if e := in.cache[[32]byte{200}]; !e.until.Equal(now.Add(time.Second)) {
+		t.Fatalf("until = %v", e.until)
 	}
 }
 

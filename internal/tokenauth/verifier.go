@@ -9,15 +9,11 @@ package tokenauth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -68,8 +64,7 @@ type Verifier struct {
 	parser *jwt.Parser
 	log    *slog.Logger
 
-	introMu    sync.Mutex
-	introCache map[string]time.Time // jti -> cached until
+	intro *introspector
 }
 
 // DefaultLeeway is the clock skew tolerated for exp/nbf/iat.
@@ -129,8 +124,17 @@ func New(o Options) *Verifier {
 			jwt.WithLeeway(o.Leeway),
 			jwt.WithTimeFunc(o.Now),
 		),
-		log:        o.Logger,
-		introCache: make(map[string]time.Time),
+		log: o.Logger,
+		intro: &introspector{
+			url:         o.IntrospectionURL,
+			client:      o.HTTPClient,
+			now:         o.Now,
+			positiveTTL: o.IntrospectionCacheTTL,
+			negativeTTL: NegativeIntrospectionCacheTTL,
+			timeout:     o.JWKSFetchTimeout,
+			maxEntries:  introspectionCacheSize,
+			cache:       make(map[[32]byte]introEntry),
+		},
 	}
 }
 
@@ -220,7 +224,7 @@ func (v *Verifier) verify(ctx context.Context, token string) (_ *auth.TokenInfo,
 	scopeStr, _ := claims["scope"].(string)
 
 	if v.opts.IntrospectionURL != "" {
-		active, err := v.introspect(ctx, token, jti, exp.Time)
+		active, err := v.intro.check(ctx, token, exp.Time)
 		if err != nil {
 			return nil, "", err
 		}
@@ -234,56 +238,4 @@ func (v *Verifier) verify(ctx context.Context, token string) (_ *auth.TokenInfo,
 		Expiration: exp.Time,
 		UserID:     subject,
 	}, "", nil
-}
-
-func (v *Verifier) introspect(ctx context.Context, token, jti string, exp time.Time) (bool, error) {
-	now := v.opts.Now()
-	{
-		v.introMu.Lock()
-		until, ok := v.introCache[jti]
-		for k, t := range v.introCache {
-			if now.After(t) {
-				delete(v.introCache, k)
-			}
-		}
-		v.introMu.Unlock()
-		if ok && now.Before(until) {
-			return true, nil
-		}
-	}
-
-	form := url.Values{"token": {token}, "token_type_hint": {"access_token"}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.opts.IntrospectionURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	resp, err := v.opts.HTTPClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("introspect: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
-		return false, nil // Kanidm answers 401 for tokens it cannot verify
-	}
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("introspect: status %d", resp.StatusCode)
-	}
-	var r struct {
-		Active bool `json:"active"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&r); err != nil {
-		return false, fmt.Errorf("introspect: %w", err)
-	}
-	if r.Active {
-		until := now.Add(v.opts.IntrospectionCacheTTL)
-		if exp.Before(until) {
-			until = exp
-		}
-		v.introMu.Lock()
-		v.introCache[jti] = until
-		v.introMu.Unlock()
-	}
-	return r.Active, nil
 }
