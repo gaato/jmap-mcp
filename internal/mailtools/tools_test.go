@@ -2,6 +2,7 @@ package mailtools
 
 import (
 	"fmt"
+	"unicode"
 
 	"bytes"
 	"context"
@@ -429,5 +430,94 @@ func TestTransportErrorLogsOnlyOrigin(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %s: %s", want, out)
 		}
+	}
+}
+
+func TestHTMLStyleSheetHiding(t *testing.T) {
+	cases := []struct {
+		name, in      string
+		want, notWant []string
+	}{
+		{name: "class rule", in: `<style>.cloak{display:none}</style><div class="x cloak">secret</div><p>shown</p>`,
+			want: []string{"shown"}, notWant: []string{"secret"}},
+		{name: "id rule with comment", in: `<style>/* x */ #hid { visibility : hidden }</style><p id="hid">secret</p><p id="other">shown</p>`,
+			want: []string{"shown"}, notWant: []string{"secret"}},
+		{name: "tag rule", in: `<style>span{font-size:0px}</style><span>secret</span><b>shown</b>`,
+			want: []string{"shown"}, notWant: []string{"secret"}},
+		{name: "selector list", in: `<style>.a, #b , i {opacity:0}</style><p class=a>s1</p><p id=b>s2</p><i>s3</i><p>shown</p>`,
+			want: []string{"shown"}, notWant: []string{"s1", "s2", "s3"}},
+		{name: "style in body and after content", in: `<p class="late">secret</p><p>shown</p><style>.late{display:none!important}</style>`,
+			want: []string{"shown"}, notWant: []string{"secret"}},
+		{name: "after other statements", in: `<style>@import url(x.css); @font-face{font-family:x} .c{display:none}</style><p class=c>secret</p>shown`,
+			want: []string{"shown"}, notWant: []string{"secret"}},
+		{name: "complex selector ignored", in: `<style>div .c{display:none} .c:hover{display:none} .d, div p{display:none}</style><p class=c>kept1</p><p class=d>kept2</p>`,
+			want: []string{"kept1", "kept2"}},
+		{name: "media rules ignored", in: `<style>@media (max-width:600px){.desk{display:none}}</style><p class=desk>kept</p>`,
+			want: []string{"kept"}},
+		{name: "non-hiding rule", in: `<style>.c{color:red;display:block}</style><p class=c>kept</p>`,
+			want: []string{"kept"}},
+		{name: "truncated stylesheet", in: `<style>.c{display:none}</style><p class=c>secret</p><style>.d{display:`,
+			notWant: []string{"secret"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := htmlToText(tc.in)
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("missing %q in %q", w, got)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(got, w) {
+					t.Errorf("unexpected %q in %q", w, got)
+				}
+			}
+		})
+	}
+}
+
+// defaultIgnorables lists every code point in the Unicode
+// Default_Ignorable_Code_Point property (derived: Other_Default_Ignorable +
+// Cf + Variation_Selector) plus the rest of the U+E0000 block.
+func defaultIgnorables() []rune {
+	var out []rune
+	for _, tab := range []*unicode.RangeTable{unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector} {
+		for _, r16 := range tab.R16 {
+			for r := rune(r16.Lo); r <= rune(r16.Hi); r += rune(r16.Stride) {
+				out = append(out, r)
+			}
+		}
+		for _, r32 := range tab.R32 {
+			for r := rune(r32.Lo); r <= rune(r32.Hi); r += rune(r32.Stride) {
+				out = append(out, r)
+			}
+		}
+	}
+	for r := rune(0xE0000); r <= 0xE0FFF; r++ {
+		out = append(out, r)
+	}
+	// Explicitly named by the review, in case the tables above change.
+	out = append(out, 0x17B4, 0x17B5, 0xFFF0, 0xFFF8, 0xE0080, 0xE00FF, 0x180B, 0x180F, 0x115F, 0x3164)
+	return out
+}
+
+func TestDefaultIgnorablesCannotSplitMarkers(t *testing.T) {
+	for _, r := range append(defaultIgnorables(), 0x200D) {
+		in := "<" + string(r) + "<" + string(r) + "<END" + string(r) + ">>" + string(r) + ">"
+		for name, got := range map[string]string{"body": cleanBody(in), "line": cleanLine(in, 100)} {
+			if strings.Contains(got, "<<<") || strings.Contains(got, ">>>") {
+				t.Fatalf("%U (%s): marker survived: %q", r, name, got)
+			}
+			if strings.ContainsRune(got, r) {
+				t.Fatalf("%U (%s): not stripped: %q", r, name, got)
+			}
+			if !strings.Contains(got, "‹‹‹END›››") {
+				t.Fatalf("%U (%s): got %q", r, name, got)
+			}
+		}
+	}
+	// ZWJ inside an emoji sequence survives.
+	if got := cleanBody("👩\u200d💻"); got != "👩\u200d💻" {
+		t.Fatalf("emoji broken: %q", got)
 	}
 }

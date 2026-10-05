@@ -61,27 +61,48 @@ func truncate(s string, maxChars int) (string, bool) {
 	return s, false
 }
 
-// invisible reports runes that render as nothing (or reorder text) and can
-// hide instructions from a human reviewing the output: format characters
-// (Cf: zero-width characters, bidi controls, soft hyphen, tag characters),
-// variation selectors, fillers and noncharacters. U+200D ZERO WIDTH JOINER is
-// kept so that emoji sequences survive.
+// invisible reports default-ignorable code points: characters that render
+// as nothing (or reorder text) and can hide instructions from a human
+// reviewing the output. This is a superset of the Unicode
+// Default_Ignorable_Code_Point property (Other_Default_Ignorable_Code_Point
+// + Cf + Variation_Selector, plus the whole U+E0000–E0FFF block), plus
+// noncharacters. U+200D ZERO WIDTH JOINER is handled by removeInvisible.
 func invisible(r rune) bool {
 	switch {
-	case r == 0x200D:
-		return false
-	case unicode.Is(unicode.Cf, r):
+	case unicode.In(r, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector):
 		return true
-	case r >= 0xE0000 && r <= 0xE007F: // tag block, including unassigned
+	case r >= 0xE0000 && r <= 0xE0FFF:
 		return true
-	case r >= 0xFE00 && r <= 0xFE0F, r >= 0xE0100 && r <= 0xE01EF, r >= 0x180B && r <= 0x180F:
-		return true // variation selectors
-	case r == 0x034F, r == 0x115F, r == 0x1160, r == 0x3164, r == 0xFFA0:
-		return true // combining grapheme joiner, Hangul fillers
+	case r >= 0x180B && r <= 0x180F: // Mongolian variation selectors and vowel separator
+		return true
 	case r >= 0xFDD0 && r <= 0xFDEF, r&0xFFFE == 0xFFFE:
 		return true // noncharacters
 	}
 	return false
+}
+
+// removeInvisible drops invisible characters and invalid UTF-8. A ZERO WIDTH
+// JOINER survives only between two visible non-ASCII characters (emoji
+// sequences), so it cannot split ASCII sequences such as "<<<".
+func removeInvisible(s string) string {
+	rs := []rune(s)
+	visibleNonASCII := func(i int) bool {
+		return i >= 0 && i < len(rs) && rs[i] >= 0x80 && rs[i] != 0x200D && !invisible(rs[i]) && rs[i] != utf8.RuneError
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i, r := range rs {
+		switch {
+		case r == 0x200D:
+			if visibleNonASCII(i-1) && visibleNonASCII(i+1) {
+				b.WriteRune(r)
+			}
+		case invisible(r) || r == utf8.RuneError:
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // cleanLine sanitizes a short header-like value: invisible characters are
@@ -89,14 +110,11 @@ func invisible(r rune) bool {
 // sequences are neutralised, and the result is capped.
 func cleanLine(s string, maxChars int) string {
 	s = strings.Map(func(r rune) rune {
-		switch {
-		case invisible(r) || r == utf8.RuneError:
-			return -1
-		case unicode.IsControl(r) || r == '\u2028' || r == '\u2029':
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 			return ' '
 		}
 		return r
-	}, s)
+	}, removeInvisible(s))
 	s = neutralizeMarkers(strings.Join(strings.Fields(s), " "))
 	if t, cut := truncate(s, maxChars); cut {
 		return t + "…"
@@ -114,10 +132,10 @@ func cleanBody(s string) string {
 			return r
 		case r == '\r' || r == '\u2028' || r == '\u2029':
 			return '\n'
-		case invisible(r) || unicode.IsControl(r) || r == utf8.RuneError:
+		case unicode.IsControl(r):
 			return -1
 		}
 		return r
-	}, s)
+	}, removeInvisible(s))
 	return neutralizeMarkers(s)
 }

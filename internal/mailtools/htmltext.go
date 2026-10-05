@@ -32,9 +32,121 @@ var reHiddenStyle = regexp.MustCompile(`(?:^|;)(?:` +
 	`display:none|visibility:(?:hidden|collapse)|color:transparent|` +
 	`(?:opacity|font-size|(?:max-)?(?:width|height)|line-height):0(?:\.0*)?(?:[a-z%]+)?(?:;|!|$))`)
 
-func hiddenElement(n *html.Node) bool {
+func hidingDeclarations(decls string) bool {
+	return reHiddenStyle.MatchString(strings.ToLower(strings.Join(strings.Fields(decls), "")))
+}
+
+// hideRules are the simple selectors that a document's <style> blocks hide.
+type hideRules struct {
+	tags, classes, ids map[string]bool
+}
+
+var (
+	reCSSComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	reSelTag     = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]*$`)
+	reSelClass   = regexp.MustCompile(`^\.(-?[_a-zA-Z][_a-zA-Z0-9-]*)$`)
+	reSelID      = regexp.MustCompile(`^#([_a-zA-Z0-9-]+)$`)
+)
+
+// addStyleSheet applies a best-effort reading of css: top-level rules whose
+// selector list consists only of simple selectors (tag, .class, #id) and
+// whose declarations hide content (same properties as inline styles) are
+// recorded. Complex selectors and at-rules (including @media, whose rules
+// only apply conditionally) are ignored.
+func (h *hideRules) addStyleSheet(css string) {
+	css = reCSSComment.ReplaceAllString(css, " ")
+	for {
+		open := strings.IndexByte(css, '{')
+		if open < 0 {
+			return
+		}
+		prelude := css[:open]
+		if k := strings.LastIndexAny(prelude, ";}"); k >= 0 {
+			prelude = prelude[k+1:] // skip statements like @import ...;
+		}
+		prelude = strings.TrimSpace(prelude)
+		// Find the matching closing brace (blocks may nest in at-rules).
+		depth, end := 0, len(css)
+		for i := open; i < len(css); i++ {
+			if css[i] == '{' {
+				depth++
+			} else if css[i] == '}' {
+				depth--
+				if depth == 0 {
+					end = i
+					break
+				}
+			}
+		}
+		body := css[open+1 : end]
+		if end < len(css) {
+			css = css[end+1:]
+		} else {
+			css = ""
+		}
+		if strings.HasPrefix(prelude, "@") || !hidingDeclarations(body) {
+			continue
+		}
+		var tags, classes, ids []string
+		simple := true
+		for _, sel := range strings.Split(prelude, ",") {
+			sel = strings.TrimSpace(sel)
+			switch {
+			case reSelTag.MatchString(sel):
+				tags = append(tags, strings.ToLower(sel))
+			case reSelClass.MatchString(sel):
+				classes = append(classes, sel[1:])
+			case reSelID.MatchString(sel):
+				ids = append(ids, sel[1:])
+			default:
+				simple = false
+			}
+		}
+		if !simple {
+			continue // ignore the whole rule if any selector is complex
+		}
+		for _, t := range tags {
+			h.tags[t] = true
+		}
+		for _, c := range classes {
+			h.classes[c] = true
+		}
+		for _, id := range ids {
+			h.ids[id] = true
+		}
+	}
+}
+
+func collectHideRules(doc *html.Node) *hideRules {
+	h := &hideRules{tags: map[string]bool{}, classes: map[string]bool{}, ids: map[string]bool{}}
+	for n := range doc.Descendants() {
+		if n.Type == html.ElementNode && n.DataAtom == atom.Style {
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				if c.Type == html.TextNode {
+					h.addStyleSheet(c.Data)
+				}
+			}
+		}
+	}
+	return h
+}
+
+func hiddenElement(n *html.Node, h *hideRules) bool {
+	if h.tags[n.Data] {
+		return true
+	}
 	for _, a := range n.Attr {
 		switch a.Key {
+		case "class":
+			for _, c := range strings.Fields(a.Val) {
+				if h.classes[c] {
+					return true
+				}
+			}
+		case "id":
+			if h.ids[a.Val] {
+				return true
+			}
 		case "hidden":
 			return true
 		case "aria-hidden":
@@ -42,7 +154,7 @@ func hiddenElement(n *html.Node) bool {
 				return true
 			}
 		case "style":
-			if reHiddenStyle.MatchString(strings.ToLower(strings.Join(strings.Fields(a.Val), ""))) {
+			if hidingDeclarations(a.Val) {
 				return true
 			}
 		}
@@ -69,6 +181,7 @@ func htmlToText(src string) string {
 		// than 512 elements). Show nothing rather than raw markup.
 		return htmlUnconvertible
 	}
+	rules := collectHideRules(doc)
 	var b strings.Builder
 	pre := 0
 	enter := func(n *html.Node) {
@@ -110,7 +223,7 @@ func htmlToText(src string) string {
 	// Iterative pre-order walk: deeply nested markup cannot exhaust the stack.
 	n := doc
 	for n != nil {
-		skip := n.Type == html.ElementNode && (skipElems[n.DataAtom] || hiddenElement(n))
+		skip := n.Type == html.ElementNode && (skipElems[n.DataAtom] || hiddenElement(n, rules))
 		if !skip {
 			enter(n)
 			if n.FirstChild != nil {

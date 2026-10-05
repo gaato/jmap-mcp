@@ -105,18 +105,24 @@ none); a mailbox item has no public web URL.
   - Bodies are plain text: `textBody` is preferred; HTML is converted with the
     HTML5 parser (`golang.org/x/net/html`), keeping only visible text. Scripts,
     styles, `head`, `template`, `noscript`, `title`, `svg`, `textarea`,
-    `iframe`, `object` and elements marked `hidden`, `aria-hidden="true"` or
-    hidden by inline style (`display:none`, `visibility:hidden`,
-    `font-size:0`, zero width/height, …; best effort) are dropped. Link
-    targets are never shown, resolved or fetched.
+    `iframe`, `object` are dropped, and so are elements marked `hidden` or
+    `aria-hidden="true"`, or hidden (`display:none`, `visibility:hidden`,
+    `font-size:0`, zero width/height, …) by an inline style or by a top-level
+    `<style>` rule with simple selectors (`tag`, `.class`, `#id`, or comma
+    lists of them). Link targets are never shown, resolved or fetched.
+  - **Hiding detection is best effort.** Complex selectors, `@media` rules,
+    external stylesheets and other tricks are not evaluated, so hidden text can
+    still come through. The actual safety boundary is that all message
+    content is labelled untrusted and wrapped in nonce markers.
   - Bodies are capped and wrapped in
     `<<<BEGIN/END UNTRUSTED EMAIL CONTENT nonce>>>` markers with a per-call
     random nonce; `<<<` and `>>>` inside the content are replaced with
     `‹‹‹`/`›››` (after entity decoding), so a message cannot fake a marker.
-  - Invisible characters (Unicode format characters such as zero-width and
-    bidi controls, tag characters, variation selectors, fillers,
-    noncharacters; ZWJ is kept for emoji) and control characters are removed
-    from bodies and from every field outside the markers.
+  - All Unicode default-ignorable code points (format characters such as
+    zero-width and bidi controls, tag characters, variation selectors,
+    fillers, the whole U+E0000–E0FFF block), noncharacters and control
+    characters are removed from bodies and from every field outside the
+    markers. ZWJ is kept only between two visible non-ASCII characters (emoji).
   - Address lists are capped at 10 entries / about 1000 characters each
     (`(and N more)`); subjects, names and previews are length-capped.
   - Results carry a notice, and every tool description says which fields are
