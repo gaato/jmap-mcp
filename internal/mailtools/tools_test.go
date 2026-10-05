@@ -2,6 +2,7 @@ package mailtools
 
 import (
 	"fmt"
+	"time"
 	"unicode"
 
 	"bytes"
@@ -519,5 +520,98 @@ func TestDefaultIgnorablesCannotSplitMarkers(t *testing.T) {
 	// ZWJ inside an emoji sequence survives.
 	if got := cleanBody("👩\u200d💻"); got != "👩\u200d💻" {
 		t.Fatalf("emoji broken: %q", got)
+	}
+}
+
+// slowMail blocks every call for delay (or until ctx is done) and records
+// the deadline it saw.
+type slowMail struct {
+	delay     time.Duration
+	deadlines chan time.Time
+}
+
+func (m *slowMail) wait(ctx context.Context) error {
+	if d, ok := ctx.Deadline(); ok {
+		m.deadlines <- d
+	} else {
+		m.deadlines <- time.Time{}
+	}
+	select {
+	case <-time.After(m.delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *slowMail) Mailboxes(ctx context.Context) ([]jmap.Mailbox, error) {
+	return nil, m.wait(ctx)
+}
+
+func (m *slowMail) SearchEmails(ctx context.Context, _ jmap.EmailFilter, _ int) ([]jmap.EmailSummary, int, error) {
+	return nil, 0, m.wait(ctx)
+}
+
+func (m *slowMail) GetEmail(ctx context.Context, _ string, _ int) (*jmap.Email, error) {
+	return nil, m.wait(ctx)
+}
+
+func (m *slowMail) GetThread(ctx context.Context, _ string, _ int) ([]jmap.EmailSummary, int, error) {
+	if err := m.wait(ctx); err != nil {
+		return nil, 0, err
+	}
+	return []jmap.EmailSummary{{ID: "e1", MailboxIDs: map[string]bool{"m": true}}}, 1, nil
+}
+
+func TestToolCallBudgetIsSharedAndEnforced(t *testing.T) {
+	if ToolBudget > 60*time.Second {
+		t.Fatalf("ToolBudget = %v, must stay at or below 60s", ToolBudget)
+	}
+	mail := &slowMail{delay: 150 * time.Millisecond, deadlines: make(chan time.Time, 10)}
+	tl := New(mail, nil)
+	tl.budget = 200 * time.Millisecond
+
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	tl.Register(s)
+	ctx := context.Background()
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := s.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+
+	// get_thread makes two backend calls (Thread/get, then the mailbox list
+	// for names), each 150 ms. With a shared 200 ms budget the second one is
+	// cut short; with per-request timeouts it would have taken 300 ms.
+	start := time.Now()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_thread", Arguments: map[string]any{"thread_id": "t1"}})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed > 280*time.Millisecond {
+		t.Fatalf("call took %v, budget not shared", elapsed)
+	}
+	d1, d2 := <-mail.deadlines, <-mail.deadlines
+	if d1.IsZero() || !d1.Equal(d2) {
+		t.Fatalf("deadlines %v / %v: want one shared deadline", d1, d2)
+	}
+	if until := time.Until(d1); until > 0 || d1.Sub(start) > 210*time.Millisecond {
+		t.Fatalf("deadline %v after start, want ~200ms", d1.Sub(start))
+	}
+	_ = res
+
+	// A single call that exceeds the budget fails with a timeout message.
+	mail.delay = time.Second
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_email", Arguments: map[string]any{"id": "e1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "timed out") {
+		t.Fatalf("result = %+v", res)
 	}
 }

@@ -215,9 +215,11 @@ The image is a static (`CGO_ENABLED=0`) binary on `distroless/static`,
 running as UID 65532. Both base images are pinned by digest in the
 `Containerfile`; refresh them with `skopeo inspect --format '{{.Digest}}'`.
 
-The HTTP server uses a 30 s read timeout, 90 s write timeout (above the 30 s
-JMAP timeout; stateless responses end with their tool call), 64 KiB header
-limit and 256 KiB MCP request body limit.
+Each tool call has a total budget of 60 s shared by all of its JMAP requests
+(each request also times out after 30 s). The HTTP server uses a 30 s read
+timeout, a 90 s write timeout (stateless responses end with their tool call,
+so this leaves 30 s of margin), a 64 KiB header limit and a 256 KiB MCP
+request body limit.
 
 ### Quadlet example
 

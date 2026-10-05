@@ -343,6 +343,9 @@ func TestHTTPServerLimits(t *testing.T) {
 		s.ReadHeaderTimeout == 0 || s.IdleTimeout == 0 || s.MaxHeaderBytes != 64<<10 {
 		t.Fatalf("server = %+v", s)
 	}
+	if mailtools.ToolBudget+20*time.Second > s.WriteTimeout {
+		t.Fatalf("tool budget %v leaves too little margin below WriteTimeout %v", mailtools.ToolBudget, s.WriteTimeout)
+	}
 }
 
 func TestRequestBodyLimit(t *testing.T) {

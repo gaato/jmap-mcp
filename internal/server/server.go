@@ -21,9 +21,11 @@ var Version = "dev"
 // MaxRequestBodyBytes bounds MCP request bodies.
 const MaxRequestBodyBytes = 256 << 10
 
-// HTTPServer returns an http.Server with conservative limits. WriteTimeout
-// is well above the JMAP client's 30 s timeout: in stateless mode each POST's
-// response (JSON or a short SSE stream) ends when its tool call returns.
+// HTTPServer returns an http.Server with conservative limits. In stateless
+// mode each POST's response (JSON or a short SSE stream) ends when its tool
+// call returns, and every tool call has a total budget of
+// mailtools.ToolBudget (60 s) across all its JMAP requests, so the 90 s
+// WriteTimeout leaves 30 s of margin.
 func HTTPServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
