@@ -93,7 +93,9 @@ none); a mailbox item has no public web URL.
   `JMAP_SESSION_URL` (plus `JMAP_ALLOWED_ORIGIN`, if set). Every redirect hop
   and the session's `apiUrl` must be on an allowed origin and pass the TLS
   rule, so a redirect or a tampered session document cannot send the
-  credentials elsewhere or over plain http.
+  credentials elsewhere or over plain http. On a redirect to an allowed
+  origin on another host the credentials are re-attached (net/http drops
+  them on host changes).
 - **Secret file.** `JMAP_PASSWORD_FILE` must be a regular file (not a
   symlink) with no group/other permissions (e.g. `0400`).
 - **Challenges.** `401` responses carry

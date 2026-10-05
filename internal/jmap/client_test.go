@@ -228,19 +228,44 @@ func TestRedirectToOtherOriginRefused(t *testing.T) {
 	}
 }
 
-func TestRedirectToExplicitlyAllowedOrigin(t *testing.T) {
+func TestRedirectToExplicitlyAllowedOriginKeepsCredentials(t *testing.T) {
+	// Two distinct host names (127.0.0.1 and localhost): Go's client drops
+	// Authorization on such a redirect, so the client must re-attach it.
 	mail := jmaptest.New()
 	defer mail.Close()
+	mailURL := strings.Replace(mail.URL, "127.0.0.1", "localhost", 1)
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, mail.URL+"/jmap/session", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, mailURL+"/jmap/session", http.StatusTemporaryRedirect)
 	}))
 	defer front.Close()
-	c, err := jmap.NewClient(front.URL+"/.well-known/jmap", mail.URL, jmaptest.Username, jmaptest.Password)
+	c, err := jmap.NewClient(front.URL+"/.well-known/jmap", mailURL, jmaptest.Username, jmaptest.Password)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Mailboxes(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRedirectToOtherHostDoesNotGetCredentials(t *testing.T) {
+	var gotAuth atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			gotAuth.Store(true)
+		}
+	}))
+	defer other.Close()
+	otherURL := strings.Replace(other.URL, "127.0.0.1", "localhost", 1)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, otherURL+"/x", http.StatusTemporaryRedirect)
+	}))
+	defer front.Close()
+	c := jmaptest.MustClient(t, front.URL+"/.well-known/jmap", "u", "p") // otherURL not allowed
+	if _, err := c.Mailboxes(context.Background()); err == nil {
+		t.Fatal("expected error")
+	}
+	if gotAuth.Load() {
+		t.Fatal("credentials reached a non-allowed host")
 	}
 }
 

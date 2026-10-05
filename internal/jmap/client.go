@@ -120,7 +120,14 @@ func NewClient(sessionURL, extraOrigin, username, password string) (*Client, err
 			if len(via) >= 5 {
 				return fmt.Errorf("jmap: too many redirects: %w", logsafe.ErrRefused)
 			}
-			return c.checkURL(req.URL)
+			if err := c.checkURL(req.URL); err != nil {
+				return err
+			}
+			// net/http drops Authorization when a redirect changes the
+			// host. The destination passed the origin and TLS checks, so
+			// it is one of ours: re-attach the credentials.
+			req.SetBasicAuth(c.username, c.password)
+			return nil
 		},
 	}
 	return c, nil
