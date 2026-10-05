@@ -142,7 +142,9 @@ none); a mailbox item has no public web URL.
   `connection`, `decode`, `http_status`, …), the HTTP status and the origin
   (`scheme://host[:port]`) only, plus the JMAP method and error type for
   JMAP method errors. Never tokens, passwords, message content, full URLs,
-  query strings or upstream error text.
+  query strings or upstream error text. At startup the server logs each
+  connector's configured public resource URL, issuer and audience; these are
+  public by design (served in the protected resource metadata).
 
 ## Configuration
 
