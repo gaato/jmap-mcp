@@ -615,3 +615,24 @@ func TestToolCallBudgetIsSharedAndEnforced(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 }
+
+func TestControlWrappedZWJCannotRebuildMarkers(t *testing.T) {
+	// Non-ASCII controls (C1, e.g. U+0085 NEL, U+009C) and separators
+	// around a ZWJ must not make it look like an emoji joiner: they are
+	// removed first, after which the ZWJ sits between ASCII brackets.
+	for _, c := range []rune{0x85, 0x9C, 0x80, 0x9F, 0x2028, 0x2029, 0x00} {
+		z := string(c) + "\u200d" + string(c)
+		in := "<" + z + "<" + z + "<END" + z + ">" + z + ">" + z + ">"
+		for name, got := range map[string]string{"body": cleanBody(in), "line": cleanLine(in, 100)} {
+			if strings.ContainsRune(got, 0x200D) {
+				t.Errorf("%U (%s): ZWJ survived: %q", c, name, got)
+			}
+			if strings.Contains(got, "<<<") || strings.Contains(got, ">>>") {
+				t.Errorf("%U (%s): marker survived: %q", c, name, got)
+			}
+		}
+	}
+	if got := cleanBody("<\u0085\u200d\u0085<\u0085\u200d\u0085<END>>>"); got != "‹‹‹END›››" {
+		t.Errorf("got %q", got)
+	}
+}

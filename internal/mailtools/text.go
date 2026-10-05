@@ -83,11 +83,18 @@ func invisible(r rune) bool {
 
 // removeInvisible drops invisible characters and invalid UTF-8. A ZERO WIDTH
 // JOINER survives only between two visible non-ASCII characters (emoji
-// sequences), so it cannot split ASCII sequences such as "<<<".
+// sequences), so it cannot split ASCII sequences such as "<<<". Callers must
+// remove or replace control characters and separators before calling it, so
+// that the neighbours seen here are the ones that survive sanitisation.
 func removeInvisible(s string) string {
 	rs := []rune(s)
 	visibleNonASCII := func(i int) bool {
-		return i >= 0 && i < len(rs) && rs[i] >= 0x80 && rs[i] != 0x200D && !invisible(rs[i]) && rs[i] != utf8.RuneError
+		if i < 0 || i >= len(rs) {
+			return false
+		}
+		r := rs[i]
+		return r >= 0x80 && r != 0x200D && r != utf8.RuneError && !invisible(r) &&
+			!unicode.IsControl(r) && !unicode.In(r, unicode.Zs, unicode.Zl, unicode.Zp)
 	}
 	var b strings.Builder
 	b.Grow(len(s))
@@ -109,12 +116,15 @@ func removeInvisible(s string) string {
 // removed, control characters (including newlines) become spaces, marker
 // sequences are neutralised, and the result is capped.
 func cleanLine(s string, maxChars int) string {
+	// Controls and separators first, then invisibles (whose ZWJ rule looks
+	// at the final neighbours), then marker neutralisation last.
 	s = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 			return ' '
 		}
 		return r
-	}, removeInvisible(s))
+	}, s)
+	s = removeInvisible(s)
 	s = neutralizeMarkers(strings.Join(strings.Fields(s), " "))
 	if t, cut := truncate(s, maxChars); cut {
 		return t + "…"
@@ -136,6 +146,8 @@ func cleanBody(s string) string {
 			return -1
 		}
 		return r
-	}, removeInvisible(s))
-	return neutralizeMarkers(s)
+	}, s)
+	// Invisibles after controls, so the ZWJ rule sees the final neighbours;
+	// marker neutralisation last.
+	return neutralizeMarkers(removeInvisible(s))
 }
