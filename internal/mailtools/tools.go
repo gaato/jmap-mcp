@@ -539,7 +539,7 @@ func (t *Tools) toolError(ctx context.Context, tool string, err error) error {
 	var re *jmap.RequestError
 	switch {
 	case errors.As(err, &me):
-		attrs = append(attrs, "jmap_method", me.Method, "jmap_error", errType(me.Type))
+		attrs = append(attrs, "jmap_method", me.LogMethod(), "jmap_error", errType(me.Type))
 	case errors.As(err, &re):
 		attrs = append(attrs, "http_status", re.Status, "jmap_error", errType(re.Type))
 	case errors.Is(err, jmap.ErrUnauthorized):

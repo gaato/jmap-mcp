@@ -58,6 +58,19 @@ func (e *RequestError) Error() string {
 	return fmt.Sprintf("jmap: request failed (HTTP %d)", e.Status)
 }
 
+// UnknownMethod is reported when an error response matches none of the
+// method calls that were sent.
+const UnknownMethod = "unknown"
+
+// LogMethod returns the method name if it is one this client can send, and
+// UnknownMethod otherwise, so only locally known names are ever logged.
+func (e *MethodError) LogMethod() string {
+	if readOnlyMethods[e.Method] {
+		return e.Method
+	}
+	return UnknownMethod
+}
+
 // MethodError is a method-level error response (RFC 8620 section 3.6.2).
 type MethodError struct {
 	Method      string
@@ -300,7 +313,9 @@ func (c *Client) call(ctx context.Context, calls ...invocation) (map[string]json
 				Description string `json:"description"`
 			}
 			_ = json.Unmarshal(r.args, &e)
-			method := r.id
+			// Only ever report a method name we sent; an unmatched call id
+			// is upstream text and must not end up in errors or logs.
+			method := UnknownMethod
 			for _, inv := range calls {
 				if inv.id == r.id {
 					method = inv.name
