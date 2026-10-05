@@ -70,7 +70,8 @@ none); a mailbox item has no public web URL.
 - **Signing keys.** JWKS is cached per connector and refetched after an hour
   or when an unknown `kid` shows up. Refetches are throttled to one per 30 s
   (also while no keys are cached), shared between concurrent requests and
-  detached from the client's request. If refreshing fails, cached keys stay
+  detached from the client's request. If refreshing fails (including a key
+  set without any usable ES256/RS256 signing key), cached keys stay
   usable for a 10 minute grace period and then verification fails closed.
   JWKS and introspection requests never follow redirects. When the key server
   or introspection endpoint is unavailable the MCP endpoint answers `503`.

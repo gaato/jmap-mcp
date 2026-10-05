@@ -73,6 +73,7 @@ var (
 	errUnknownKID   = errors.New("unknown kid")
 	errNoValidKeys  = errors.New("no valid signing keys (JWKS unavailable or expired)")
 	errJWKSThrottle = errors.New("jwks refresh throttled")
+	errNoUsableKeys = errors.New("jwks contains no usable signing keys")
 )
 
 func (c *jwksCache) cached(kid string) (k verificationKey, found, fresh, usable bool) {
@@ -165,6 +166,11 @@ func (c *jwksCache) fetch(ctx context.Context) (map[string]verificationKey, erro
 			continue // skip keys we cannot use instead of failing the whole set
 		}
 		keys[j.Kid] = k
+	}
+	if len(keys) == 0 {
+		// Treat like a failed fetch: keep the previous keys (within the
+		// grace period) instead of caching an empty set as fresh.
+		return nil, logsafe.Wrap("fetch jwks", errNoUsableKeys)
 	}
 	return keys, nil
 }

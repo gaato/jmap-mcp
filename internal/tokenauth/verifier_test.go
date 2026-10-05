@@ -58,6 +58,7 @@ type testEnv struct {
 	keys    []signer
 	now     time.Time
 	fail    atomic.Bool   // answer 500
+	empty   atomic.Bool   // answer an empty key set
 	gate    chan struct{} // if set, each fetch waits for a value
 }
 
@@ -70,6 +71,10 @@ func newEnv(t *testing.T, keys ...signer) *testEnv {
 		}
 		if e.fail.Load() {
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if e.empty.Load() {
+			_, _ = w.Write([]byte(`{"keys":[{"kty":"oct","kid":"sym","k":"c2VjcmV0"}]}`))
 			return
 		}
 		e.mu.Lock()
@@ -597,5 +602,37 @@ func TestLogsAreRedacted(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %s: %s", want, out)
 		}
+	}
+}
+
+func TestEmptyJWKSIsAFailedFetch(t *testing.T) {
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+	env.empty.Store(true)
+	v := env.verifier(nil)
+	verify := func() error {
+		_, err := v.Verify(context.Background(), sign(t, k, env.kanidmClaims(), "at+jwt"), nil)
+		return err
+	}
+	// No usable keys at startup: unavailable (503), not "unknown kid" (401).
+	if err := verify(); err == nil || errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("err = %v, want unavailable", err)
+	}
+
+	env.empty.Store(false)
+	env.now = env.now.Add(31 * time.Second)
+	if err := verify(); err != nil {
+		t.Fatal(err)
+	}
+	// The key server starts serving an empty (unusable) set: previous keys
+	// stay valid within the grace period, then verification fails closed.
+	env.empty.Store(true)
+	env.now = env.now.Add(time.Hour + time.Minute)
+	if err := verify(); err != nil {
+		t.Fatalf("inside grace: %v", err)
+	}
+	env.now = env.now.Add(10 * time.Minute)
+	if err := verify(); err == nil || errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("after grace: err = %v, want unavailable", err)
 	}
 }
