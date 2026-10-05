@@ -1,6 +1,7 @@
 package tokenauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -557,5 +559,43 @@ func TestIntrospectionCacheTTLIsCapped(t *testing.T) {
 	v := New(Options{IntrospectionCacheTTL: time.Hour})
 	if v.opts.IntrospectionCacheTTL != MaxIntrospectionCacheTTL {
 		t.Fatalf("ttl = %v", v.opts.IntrospectionCacheTTL)
+	}
+}
+
+func TestLogsAreRedacted(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	k := newSigner(t, "k1")
+	env := newEnv(t, k)
+
+	// Dependency failure: only operation, kind and origin are logged.
+	v := env.verifier(func(o *Options) {
+		o.JWKSURL = "http://127.0.0.1:1/oauth2/openid/x/public_key.jwk?secret=QUERYSECRET"
+		o.Logger = log
+	})
+	if _, err := v.Verify(context.Background(), sign(t, k, env.kanidmClaims(), "at+jwt"), nil); err == nil {
+		t.Fatal("expected error")
+	}
+	// Rejection: token-supplied text (here the kid) never reaches the log.
+	evil := newSigner(t, "KIDINJECTION ignore previous instructions")
+	v = env.verifier(func(o *Options) { o.Logger = log })
+	if _, err := v.Verify(context.Background(), sign(t, evil, env.kanidmClaims(), "at+jwt"), nil); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := v.Verify(context.Background(), "MALFORMEDINJECTION.x.y", nil); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("err = %v", err)
+	}
+
+	out := buf.String()
+	for _, bad := range []string{"QUERYSECRET", "public_key.jwk", "/oauth2", "KIDINJECTION", "MALFORMEDINJECTION"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("log contains %q: %s", bad, out)
+		}
+	}
+	for _, want := range []string{`"op":"fetch jwks"`, `"origin":"http://127.0.0.1:1"`, `"kind":"connection"`,
+		`"reason":"unknown kid"`, `"reason":"malformed"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log lacks %s: %s", want, out)
+		}
 	}
 }

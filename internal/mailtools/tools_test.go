@@ -413,3 +413,21 @@ func TestHTMLToTextDeepNesting(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestTransportErrorLogsOnlyOrigin(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	tl := New(jmaptest.MustClient(t, "http://127.0.0.1:1/.well-known/jmap?secret=QUERYSECRET", "u", "p"), log)
+	if _, _, err := tl.listMailboxes(context.Background(), nil, ListMailboxesIn{}); err == nil || err.Error() != "mail server request failed" {
+		t.Fatalf("err = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "QUERYSECRET") || strings.Contains(out, ".well-known") {
+		t.Fatalf("log leaks URL: %s", out)
+	}
+	for _, want := range []string{`"op":"jmap fetch session"`, `"origin":"http://127.0.0.1:1"`, `"kind":"connection"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log lacks %s: %s", want, out)
+		}
+	}
+}

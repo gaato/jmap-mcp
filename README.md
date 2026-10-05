@@ -123,9 +123,13 @@ none); a mailbox item has no public web URL.
     untrusted third-party data. `search` results follow the ChatGPT contract
     exactly (`results: [{id, title, url}]`, no room for an extra field), so
     their titles start with `[untrusted email]` instead.
-- **Logs** contain method, path, status, duration and rejection reasons, and
-  for JMAP failures only the method, error type and HTTP status; never
-  tokens, passwords, message content or upstream error descriptions.
+- **Logs** contain method, path, status, duration and fixed rejection
+  reasons. Failures of dependencies (JWKS, introspection, JMAP) are logged as
+  a fixed operation name, a coarse kind (`timeout`, `dns`, `tls`,
+  `connection`, `decode`, `http_status`, …), the HTTP status and the origin
+  (`scheme://host[:port]`) only, plus the JMAP method and error type for
+  JMAP method errors. Never tokens, passwords, message content, full URLs,
+  query strings or upstream error text.
 
 ## Configuration
 

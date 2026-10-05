@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gaato/jmap-mcp/internal/logsafe"
 	"github.com/gaato/jmap-mcp/internal/urlpolicy"
 )
 
@@ -46,6 +47,9 @@ type RequestError struct {
 	Type   string
 	Detail string
 }
+
+// HTTPStatus implements logsafe.StatusError.
+func (e *RequestError) HTTPStatus() int { return e.Status }
 
 func (e *RequestError) Error() string {
 	if e.Type != "" {
@@ -114,7 +118,7 @@ func NewClient(sessionURL, extraOrigin, username, password string) (*Client, err
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
-				return errors.New("jmap: too many redirects")
+				return fmt.Errorf("jmap: too many redirects: %w", logsafe.ErrRefused)
 			}
 			return c.checkURL(req.URL)
 		},
@@ -124,10 +128,10 @@ func NewClient(sessionURL, extraOrigin, username, password string) (*Client, err
 
 func (c *Client) checkURL(u *url.URL) error {
 	if err := urlpolicy.Check(u); err != nil {
-		return fmt.Errorf("jmap: refusing URL: %w", err)
+		return fmt.Errorf("jmap: refusing URL: %w: %w", logsafe.ErrRefused, err)
 	}
 	if !c.allowed[urlpolicy.Origin(u)] {
-		return fmt.Errorf("jmap: refusing URL on origin %s (not the configured JMAP origin)", urlpolicy.Origin(u))
+		return fmt.Errorf("jmap: refusing URL on origin %s (not the configured JMAP origin): %w", urlpolicy.Origin(u), logsafe.ErrRefused)
 	}
 	return nil
 }
@@ -146,7 +150,7 @@ func (c *Client) getSession(ctx context.Context) (*session, error) {
 	req.SetBasicAuth(c.username, c.password)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("jmap: fetch session: %w", err)
+		return nil, logsafe.Wrap("jmap fetch session", err)
 	}
 	defer resp.Body.Close()
 	if err := statusError(resp); err != nil {
@@ -158,7 +162,7 @@ func (c *Client) getSession(ctx context.Context) (*session, error) {
 		State           string            `json:"state"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil {
-		return nil, fmt.Errorf("jmap: decode session: %w", err)
+		return nil, logsafe.Wrap("jmap decode session", err)
 	}
 	acct := doc.PrimaryAccounts[capMail]
 	if acct == "" || doc.APIURL == "" {
@@ -262,7 +266,7 @@ func (c *Client) call(ctx context.Context, calls ...invocation) (map[string]json
 	req.SetBasicAuth(c.username, c.password)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("jmap: request: %w", err)
+		return nil, logsafe.Wrap("jmap request", err)
 	}
 	defer resp.Body.Close()
 	if err := statusError(resp); err != nil {
@@ -276,7 +280,7 @@ func (c *Client) call(ctx context.Context, calls ...invocation) (map[string]json
 		SessionState    string     `json:"sessionState"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
-		return nil, fmt.Errorf("jmap: decode response: %w", err)
+		return nil, logsafe.Wrap("jmap decode response", err)
 	}
 	if out.SessionState != "" && out.SessionState != s.state {
 		c.invalidateSession() // refetch the session (apiUrl, accounts) next time

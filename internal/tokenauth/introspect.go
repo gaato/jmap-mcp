@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gaato/jmap-mcp/internal/logsafe"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -125,20 +125,20 @@ func (in *introspector) request(ctx context.Context, token string) (bool, error)
 	req.Header.Set("Accept", "application/json")
 	resp, err := in.client.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("introspect: %w", err)
+		return false, logsafe.Wrap("introspect", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
 		return false, nil // Kanidm answers 401 for tokens it cannot verify
 	}
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("introspect: status %d", resp.StatusCode)
+		return false, &logsafe.Status{Op: "introspect", Code: resp.StatusCode}
 	}
 	var r struct {
 		Active bool `json:"active"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&r); err != nil {
-		return false, fmt.Errorf("introspect: %w", err)
+		return false, logsafe.Wrap("decode introspection", err)
 	}
 	return r.Active, nil
 }

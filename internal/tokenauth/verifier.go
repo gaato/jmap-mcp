@@ -10,12 +10,12 @@ package tokenauth
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/gaato/jmap-mcp/internal/logsafe"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 )
@@ -114,6 +114,7 @@ func New(o Options) *Verifier {
 			grace:        o.JWKSGrace,
 			minInterval:  o.JWKSMinRefreshInterval,
 			fetchTimeout: o.JWKSFetchTimeout,
+			log:          o.Logger,
 		},
 		parser: jwt.NewParser(
 			jwt.WithValidMethods([]string{"ES256", "RS256"}),
@@ -148,7 +149,11 @@ var errUnavailable = errors.New("token verification unavailable")
 func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 	info, reason, err := v.verify(ctx, token)
 	if err != nil {
-		v.log.ErrorContext(ctx, "token verification failed", "error", err)
+		attrs := logsafe.Attrs(err)
+		if errors.Is(err, errNoValidKeys) {
+			attrs = append(attrs, "detail", "no valid signing keys")
+		}
+		v.log.ErrorContext(ctx, "token verification failed", attrs...)
 		return nil, errUnavailable
 	}
 	if reason != "" {
@@ -174,15 +179,15 @@ func (v *Verifier) verify(ctx context.Context, token string) (_ *auth.TokenInfo,
 			return nil, err
 		}
 		if alg, _ := t.Header["alg"].(string); alg != k.alg {
-			return nil, fmt.Errorf("alg %q does not match key", alg)
+			return nil, errAlgMismatch
 		}
 		return k.key, nil
 	})
 	if keyErr != nil {
-		return nil, "", keyErr
+		return nil, "", logsafe.Wrap("jwks", keyErr)
 	}
 	if err != nil {
-		return nil, err.Error(), nil
+		return nil, parseReason(err), nil
 	}
 
 	// RFC 9068 section 4: the typ header must be at+jwt (optionally with the
@@ -238,4 +243,33 @@ func (v *Verifier) verify(ctx context.Context, token string) (_ *auth.TokenInfo,
 		Expiration: exp.Time,
 		UserID:     subject,
 	}, "", nil
+}
+
+var errAlgMismatch = errors.New("alg does not match key")
+
+// parseReason maps a parse/validation error to a fixed string, so that no
+// token-supplied text ends up in the logs.
+func parseReason(err error) string {
+	for _, r := range []struct {
+		err    error
+		reason string
+	}{
+		{errUnknownKID, "unknown kid"},
+		{errAlgMismatch, "alg does not match key"},
+		{jwt.ErrTokenMalformed, "malformed"},
+		{jwt.ErrTokenSignatureInvalid, "bad signature"},
+		{jwt.ErrTokenExpired, "expired"},
+		{jwt.ErrTokenNotValidYet, "not valid yet"},
+		{jwt.ErrTokenUsedBeforeIssued, "used before issued"},
+		{jwt.ErrTokenInvalidIssuer, "wrong issuer"},
+		{jwt.ErrTokenInvalidAudience, "wrong audience"},
+		{jwt.ErrTokenRequiredClaimMissing, "required claim missing"},
+		{jwt.ErrTokenInvalidClaims, "invalid claims"},
+		{jwt.ErrTokenUnverifiable, "unverifiable"},
+	} {
+		if errors.Is(err, r.err) {
+			return r.reason
+		}
+	}
+	return "invalid token"
 }

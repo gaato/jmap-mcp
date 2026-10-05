@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/gaato/jmap-mcp/internal/jmap"
+	"github.com/gaato/jmap-mcp/internal/logsafe"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -529,7 +530,7 @@ func (t *Tools) toolError(ctx context.Context, tool string, err error) error {
 	case errors.Is(err, jmap.ErrUnauthorized):
 		attrs = append(attrs, "jmap_error", "unauthorized")
 	default:
-		attrs = append(attrs, "error", err.Error())
+		attrs = append(attrs, logsafe.Attrs(err)...)
 	}
 	t.log.WarnContext(ctx, "tool failed", attrs...)
 

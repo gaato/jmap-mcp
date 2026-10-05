@@ -9,13 +9,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/gaato/jmap-mcp/internal/logsafe"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -58,6 +59,7 @@ type jwksCache struct {
 	grace        time.Duration
 	minInterval  time.Duration
 	fetchTimeout time.Duration
+	log          *slog.Logger
 
 	sf singleflight.Group
 
@@ -89,15 +91,19 @@ func (c *jwksCache) lookup(ctx context.Context, kid string) (verificationKey, er
 	// Unknown kid or stale cache: try a (throttled, shared) refresh. Its
 	// error does not matter here; the cache state afterwards decides.
 	ch := c.sf.DoChan("refresh", func() (any, error) { return nil, c.refresh(ctx) })
+	var refreshErr error
 	select {
-	case <-ch:
+	case r := <-ch:
+		if r.Err != nil && !errors.Is(r.Err, errJWKSThrottle) {
+			refreshErr = r.Err
+		}
 	case <-ctx.Done():
 		return verificationKey{}, ctx.Err()
 	}
 	k, found, _, usable := c.cached(kid)
 	switch {
 	case !usable:
-		return verificationKey{}, errNoValidKeys
+		return verificationKey{}, errors.Join(errNoValidKeys, refreshErr)
 	case !found:
 		return verificationKey{}, errUnknownKID
 	}
@@ -118,6 +124,9 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 	defer cancel()
 	keys, err := c.fetch(fctx)
 	if err != nil {
+		if c.log != nil {
+			c.log.WarnContext(ctx, "jwks refresh failed", logsafe.Attrs(err)...)
+		}
 		return err
 	}
 	c.mu.Lock()
@@ -134,17 +143,17 @@ func (c *jwksCache) fetch(ctx context.Context) (map[string]verificationKey, erro
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch jwks: %w", err)
+		return nil, logsafe.Wrap("fetch jwks", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch jwks: status %d", resp.StatusCode)
+		return nil, &logsafe.Status{Op: "fetch jwks", Code: resp.StatusCode}
 	}
 	var doc struct {
 		Keys []jwk `json:"keys"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil {
-		return nil, fmt.Errorf("decode jwks: %w", err)
+		return nil, logsafe.Wrap("decode jwks", err)
 	}
 	keys := make(map[string]verificationKey)
 	for _, j := range doc.Keys {
