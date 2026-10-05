@@ -18,8 +18,8 @@ endpoint and its own protected resource metadata (RFC 9728):
 
 | Connector | MCP endpoint | Metadata | Kanidm client |
 | --- | --- | --- | --- |
-| `claude` | `https://mail-mcp.gaato.net/claude/mcp` | `/.well-known/oauth-protected-resource/claude/mcp` | `mcp-jmap-claude` |
-| `chatgpt` | `https://mail-mcp.gaato.net/chatgpt/mcp` | `/.well-known/oauth-protected-resource/chatgpt/mcp` | `mcp-jmap-chatgpt` |
+| `claude` | `https://mcp.example.net/claude/mcp` | `/.well-known/oauth-protected-resource/claude/mcp` | `mcp-jmap-claude` |
+| `chatgpt` | `https://mcp.example.net/chatgpt/mcp` | `/.well-known/oauth-protected-resource/chatgpt/mcp` | `mcp-jmap-chatgpt` |
 
 An endpoint accepts only tokens issued by its own client (`iss` and `aud`
 pinned), so a Claude token is rejected on the ChatGPT endpoint and vice versa.
@@ -151,13 +151,13 @@ none); a mailbox item has no public web URL.
 | Variable | Required | Description |
 | --- | --- | --- |
 | `LISTEN_ADDR` | no | Listen address, default `:8080` |
-| `PUBLIC_BASE_URL` | yes | Public origin without path, e.g. `https://mail-mcp.gaato.net`. Connector `<name>` is served at `<base>/<name>/mcp`, which is also its RFC 9728 `resource`. |
+| `PUBLIC_BASE_URL` | yes | Public origin without path, e.g. `https://mcp.example.net`. Connector `<name>` is served at `<base>/<name>/mcp`, which is also its RFC 9728 `resource`. |
 | `CONNECTORS` | yes | Comma-separated connector names (`[a-z0-9][a-z0-9_-]*`), e.g. `claude,chatgpt` |
-| `CONNECTOR_<NAME>_ISSUER` | yes | Exact `iss` for that connector, e.g. `https://id.home.gaato.net/oauth2/openid/mcp-jmap-claude`. `<NAME>` is the name upper-cased with `-` → `_`. |
+| `CONNECTOR_<NAME>_ISSUER` | yes | Exact `iss` for that connector, e.g. `https://idm.example.net/oauth2/openid/mcp-jmap-claude`. `<NAME>` is the name upper-cased with `-` → `_`. |
 | `CONNECTOR_<NAME>_AUDIENCE` | yes | Required `aud`; for Kanidm the client name, e.g. `mcp-jmap-claude` |
 | `CONNECTOR_<NAME>_JWKS_URL` | no | Default `<issuer>/public_key.jwk` |
 | `OAUTH_ALLOWED_SUBJECT` | yes | The only user allowed in, for all connectors: the Kanidm account UUID, lowercase with hyphens, compared exactly with `sub` |
-| `OAUTH_INTROSPECTION_URL` | yes | e.g. `https://id.home.gaato.net/oauth2/token/introspect` (shared; no client auth needed with Kanidm) |
+| `OAUTH_INTROSPECTION_URL` | yes | e.g. `https://idm.example.net/oauth2/token/introspect` (shared; no client auth needed with Kanidm) |
 | `JMAP_SESSION_URL` | yes | e.g. `https://mail.example.net/.well-known/jmap` (redirects are followed; the primary mail account is used) |
 | `JMAP_ALLOWED_ORIGIN` | no | A second origin (`https://host[:port]`) that redirects and the session's `apiUrl` may use, e.g. when `/.well-known/jmap` on the mail domain redirects to the JMAP host |
 | `JMAP_USERNAME` | yes | JMAP login |
@@ -186,13 +186,13 @@ kanidm group add-members mcp_jmap_users gaato
 kanidm person get gaato    # uuid -> OAUTH_ALLOWED_SUBJECT
 
 # Claude
-kanidm system oauth2 create mcp-jmap-claude "Mail for Claude" https://mail-mcp.gaato.net
+kanidm system oauth2 create mcp-jmap-claude "Mail for Claude" https://mcp.example.net
 kanidm system oauth2 update-scope-map mcp-jmap-claude mcp_jmap_users mail_read offline_access
 kanidm system oauth2 add-redirect-url mcp-jmap-claude https://claude.ai/api/mcp/auth_callback
 kanidm system oauth2 show-basic-secret mcp-jmap-claude
 
 # ChatGPT
-kanidm system oauth2 create mcp-jmap-chatgpt "Mail for ChatGPT" https://mail-mcp.gaato.net
+kanidm system oauth2 create mcp-jmap-chatgpt "Mail for ChatGPT" https://mcp.example.net
 kanidm system oauth2 update-scope-map mcp-jmap-chatgpt mcp_jmap_users mail_read offline_access
 kanidm system oauth2 show-basic-secret mcp-jmap-chatgpt
 # After creating the ChatGPT connector, add the callback URL its OAuth
@@ -228,7 +228,7 @@ request body limit.
 ### Quadlet example
 
 `/etc/containers/systemd/jmap-mcp.container`, behind a TLS reverse proxy for
-`mail-mcp.gaato.net`:
+`mcp.example.net`:
 
 ```ini
 [Unit]
@@ -238,14 +238,14 @@ After=network-online.target
 [Container]
 Image=localhost/jmap-mcp:latest
 PublishPort=127.0.0.1:8787:8080
-Environment=PUBLIC_BASE_URL=https://mail-mcp.gaato.net
+Environment=PUBLIC_BASE_URL=https://mcp.example.net
 Environment=CONNECTORS=claude,chatgpt
-Environment=CONNECTOR_CLAUDE_ISSUER=https://id.home.gaato.net/oauth2/openid/mcp-jmap-claude
+Environment=CONNECTOR_CLAUDE_ISSUER=https://idm.example.net/oauth2/openid/mcp-jmap-claude
 Environment=CONNECTOR_CLAUDE_AUDIENCE=mcp-jmap-claude
-Environment=CONNECTOR_CHATGPT_ISSUER=https://id.home.gaato.net/oauth2/openid/mcp-jmap-chatgpt
+Environment=CONNECTOR_CHATGPT_ISSUER=https://idm.example.net/oauth2/openid/mcp-jmap-chatgpt
 Environment=CONNECTOR_CHATGPT_AUDIENCE=mcp-jmap-chatgpt
 Environment=OAUTH_ALLOWED_SUBJECT=00000000-0000-0000-0000-000000000000
-Environment=OAUTH_INTROSPECTION_URL=https://id.home.gaato.net/oauth2/token/introspect
+Environment=OAUTH_INTROSPECTION_URL=https://idm.example.net/oauth2/token/introspect
 Environment=JMAP_SESSION_URL=https://mail.example.net/.well-known/jmap
 Environment=JMAP_USERNAME=you@example.net
 Environment=JMAP_PASSWORD_FILE=/run/secrets/jmap-app-password
@@ -265,3 +265,7 @@ WantedBy=multi-user.target
 The SDK's DNS-rebinding guard is disabled because it rejects proxied requests
 arriving on a loopback listener; every MCP request needs a valid bearer token
 anyway.
+
+## License
+
+[Blue Oak Model License 1.0.0](LICENSE.md) (`BlueOak-1.0.0`).
