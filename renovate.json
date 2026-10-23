@@ -3,11 +3,27 @@
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests", ":timezone(Asia/Tokyo)"],
   "schedule": ["before 6am on friday"],
   "minimumReleaseAge": "3 days",
+  "lockFileMaintenance": {
+    "description": "Vulnerability PRs only fix direct dependencies; a daily lock file refresh lands transitive fixes within a day.",
+    "enabled": true,
+    "schedule": ["before 6am"]
+  },
   "packageRules": [
     {
-      "description": "Batch non-major updates into one PR; majors get their own.",
+      "description": "Lock file maintenance has no release date to wait on, so minimumReleaseAge would keep it pending forever; merge it once CI passes.",
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "minimumReleaseAge": null,
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false
+    },
+    {
+      "description": "Batch non-major updates into one PR and merge it once CI passes; majors get their own and stay manual.",
       "matchUpdateTypes": ["minor", "patch", "digest", "pin", "pinDigest"],
-      "groupName": "non-major dependencies"
+      "groupName": "non-major dependencies",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false
     }
   ]
 }
